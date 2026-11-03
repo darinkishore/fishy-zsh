@@ -1,16 +1,3 @@
-From ec53e7b3498f9a05127f644da6e9d0bd0498fe14 Mon Sep 17 00:00:00 2001
-From: darin <darin@mcptesting.com>
-Date: Tue, 3 Nov 2026 13:44:04 -0800
-Subject: [PATCH] fishy: __fishy builtin exposing reader
- completion/autosuggest/history/word logic
-
----
- src/builtins/shared/misc.rs |   4 +
- src/reader/reader.rs        |   4 +
- src/reader/reader/fishy.rs  | 473 ++++++++++++++++++++++++++++++++++++
- 3 files changed, 481 insertions(+)
- create mode 100644 src/reader/reader/fishy.rs
-
 diff --git a/src/builtins/shared/misc.rs b/src/builtins/shared/misc.rs
 index 39ee74d9e..465303e12 100644
 --- a/src/builtins/shared/misc.rs
@@ -43,10 +30,10 @@ index 87803da12..0115d126c 100644
      use super::{combine_command_and_autosuggestion, completion_apply_to_command_line};
 diff --git a/src/reader/reader/fishy.rs b/src/reader/reader/fishy.rs
 new file mode 100644
-index 000000000..0909a1f0a
+index 000000000..77aa4d1e9
 --- /dev/null
 +++ b/src/reader/reader/fishy.rs
-@@ -0,0 +1,473 @@
+@@ -0,0 +1,1062 @@
 +//! `__fishy`: headless access to the reader's completion, autosuggestion, word
 +//! motion and history logic, so another line editor (zsh, via fishy-zsh) can
 +//! reproduce fish's interactive behavior exactly instead of approximating it.
@@ -72,11 +59,29 @@ index 000000000..0909a1f0a
 +//!       P new_pos
 +//!   __fishy accept-word STYLE TO_END HAVE TEXT   (autosuggestion portion)
 +//!       P want
++//!   __fishy apply ZOPTS VAL FLAGS CURSOR APPEND_ONLY IS_UNIQUE LINE
++//!       A new_line new_cursor   (completion inserted with zsh quoting)
++//!   __fishy pager-filter NEEDLE PREFIX (DESC COMPS)...   COMPS joined by \x1e
++//!       M index   for each entry passing Pager::completion_info_passes_filter
++//!   __fishy token-extent CURSOR LINE
++//!       E tok_start tok_end prev_start prev_end
++//!   __fishy forward-token POS LINE            (Reader::forward_token, non-autosuggest)
++//!   __fishy backward-token POS LINE           (Reader::backward_token)
++//!       P new_pos | N   (N = no motion)
++//!   __fishy expand-abbr CURSOR LINE           (reader_expand_abbreviation_at_cursor)
++//!       R start end text cursor|-1   or nothing
++//!   __fishy face (FG_ROLE BG_ROLE VALID_PATH FORCE_UNDERLINE)...
++//!       F zsh_highlight_spec per group (resolved exactly like the reader's colors)
 +
 +use super::*;
 +use crate::builtins::{BuiltinResult, STATUS_INVALID_ARGS, SUCCESS};
 +use crate::io::IoStreams;
 +use fish_wcstringutil::ContainType;
++use crate::highlight::HighlightColorResolver;
++use fish_wcstringutil::string_fuzzy_match_string;
++use crate::text_face::{ResettableStyle, TextFace};
++use fish_color::Color;
++use fish_widestring::decode_byte_from_char;
 +use std::cell::RefCell;
 +
 +thread_local! {
@@ -411,6 +416,50 @@ index 000000000..0909a1f0a
 +    buff_pos.min(len)
 +}
 +
++
++fn parse_role(name: &wstr) -> Option<HighlightRole> {
++    let last = HighlightRole::PagerSelectedDescription as u8;
++    (0..=last)
++        // SAFETY: HighlightRole is repr(u8) with contiguous discriminants 0..=last
++        // (pager.rs relies on the same layout).
++        .map(|n| unsafe { std::mem::transmute::<u8, HighlightRole>(n) })
++        .find(|role| role.to_string() == name.to_string())
++}
++
++/// A resolved fish TextFace as a zle region_highlight spec.
++fn face_to_zsh(face: &TextFace) -> WString {
++    let color = |c: &Color, key: &str| -> Option<String> {
++        match c {
++            Color::Named { idx } => Some(format!("{key}={idx}")),
++            Color::Rgb(rgb) => Some(format!("{key}=#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b)),
++            Color::Normal | Color::None => None,
++        }
++    };
++    let mut parts: Vec<String> = vec![];
++    parts.extend(color(&face.fg, "fg"));
++    parts.extend(color(&face.bg, "bg"));
++    let st = &face.style;
++    if st.is_bold() {
++        parts.push("bold".into());
++    }
++    if st.is_dim() {
++        parts.push("faint".into());
++    }
++    if matches!(st.italics, ResettableStyle::On(())) {
++        parts.push("italic".into());
++    }
++    if matches!(st.underline_style, ResettableStyle::On(_)) {
++        parts.push("underline".into());
++    }
++    if matches!(st.reverse, ResettableStyle::On(())) {
++        parts.push("standout".into());
++    }
++    if parts.is_empty() {
++        parts.push("none".into());
++    }
++    parts.join(",").into()
++}
++
 +pub fn fishy(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) -> BuiltinResult {
 +    let args: Vec<WString> = argv.iter().map(|a| (*a).to_owned()).collect();
 +    let arg = |i: usize| args.get(i).map(|s| s.as_utfstr());
@@ -516,10 +565,534 @@ index 000000000..0909a1f0a
 +            }
 +            record(streams, &[L!("P"), &num(want)]);
 +        }
++        Some("apply") => {
++            let (Some(z), Some(val), Some(flags), Some(cur), Some(ao), Some(uq), Some(line)) = (
++                arg(2).map(ZshOpts::parse),
++                arg(3),
++                arg(4).and_then(parse_flags),
++                arg(5).and_then(parse_usize),
++                arg(6),
++                arg(7),
++                arg(8),
++            ) else {
++                return bad;
++            };
++            let mut cursor = cur.min(line.len());
++            let new_line = zsh_apply(
++                &mut OperationContext::background_interruptible(parser.vars()),
++                val,
++                flags,
++                line,
++                &mut cursor,
++                ao == "1",
++                uq == "1",
++                z,
++            );
++            record(streams, &[L!("A"), &new_line, &num(cursor)]);
++        }
++        Some("pager-filter") => {
++            // Mirrors Pager::completion_info_passes_filter (with a non-empty needle).
++            let (Some(needle), Some(prefix)) = (arg(2), arg(3)) else {
++                return bad;
++            };
++            let rest = &args[4..];
++            if rest.len() % 2 != 0 {
++                return bad;
++            }
++            for (i, pair) in rest.chunks(2).enumerate() {
++                let passes = string_fuzzy_match_string(needle, &pair[0], false).is_some()
++                    || pair[1].as_char_slice().split(|&c| c == '\x1e').any(|comp| {
++                        let mut full = prefix.to_owned();
++                        full.push_utfstr(wstr::from_char_slice(comp));
++                        string_fuzzy_match_string(needle, &full, false).is_some()
++                    });
++                if passes {
++                    record(streams, &[L!("M"), &num(i)]);
++                }
++            }
++        }
++        Some("token-extent") => {
++            let (Some(cur), Some(line)) = (arg(2).and_then(parse_usize), arg(3)) else {
++                return bad;
++            };
++            let (tok, prev) = get_token_extent(line, cur.min(line.len()));
++            record(
++                streams,
++                &[L!("E"), &num(tok.start), &num(tok.end), &num(prev.start), &num(prev.end)],
++            );
++        }
++        Some("backward-token") => {
++            let (Some(pos), Some(line)) = (arg(2).and_then(parse_usize), arg(3)) else {
++                return bad;
++            };
++            let pos = pos.min(line.len());
++            if pos == 0 {
++                record(streams, &[L!("N")]);
++            } else {
++                let (tok, prev_tok) = get_token_extent(line, pos);
++                let new_position = if tok.start == pos {
++                    if prev_tok.start == pos {
++                        let cmdsub = get_cmdsubst_extent(line, prev_tok.start);
++                        cmdsub.start.saturating_sub(1)
++                    } else {
++                        prev_tok.start
++                    }
++                } else {
++                    tok.start
++                };
++                record(streams, &[L!("P"), &num(new_position)]);
++            }
++        }
++        Some("forward-token") => {
++            let (Some(pos), Some(line)) = (arg(2).and_then(parse_usize), arg(3)) else {
++                return bad;
++            };
++            let pos = pos.min(line.len());
++            if pos == line.len() {
++                record(streams, &[L!("N")]);
++            } else {
++                let cmdsubst_range = get_cmdsubst_extent(line, pos);
++                let mut result = line.len();
++                for token in Tokenizer::new(
++                    &line[cmdsubst_range.clone()],
++                    TokFlags { accept_unfinished: true, ..Default::default() },
++                ) {
++                    if token.type_ != TokenType::String {
++                        continue;
++                    }
++                    let tok_end = cmdsubst_range.start + token.end();
++                    if tok_end > pos {
++                        result = tok_end;
++                        break;
++                    }
++                }
++                record(streams, &[L!("P"), &num(result)]);
++            }
++        }
++        Some("expand-abbr") => {
++            let (Some(cur), Some(line)) = (arg(2).and_then(parse_usize), arg(3)) else {
++                return bad;
++            };
++            if let Some(r) = reader_expand_abbreviation_at_cursor(line, cur.min(line.len()), parser) {
++                let start = r.range.start();
++                let end = start + r.range.length();
++                let cursor = match r.cursor {
++                    Some(c) => num(c),
++                    None => L!("-1").to_owned(),
++                };
++                record(streams, &[L!("R"), &num(start), &num(end), &r.text, &cursor]);
++            }
++        }
++        Some("face") => {
++            // Groups of four: FG_ROLE BG_ROLE VALID_PATH FORCE_UNDERLINE.
++            let rest = &args[2..];
++            if rest.is_empty() || rest.len() % 4 != 0 {
++                return bad;
++            }
++            let mut resolver = HighlightColorResolver::new();
++            for group in rest.chunks(4) {
++                let (Some(fg), Some(bg)) = (parse_role(&group[0]), parse_role(&group[1])) else {
++                    return bad;
++                };
++                let spec = HighlightSpec {
++                    foreground: fg,
++                    background: bg,
++                    valid_path: group[2] == "1",
++                    force_underline: group[3] == "1",
++                };
++                let face = resolver.resolve_spec(&spec, parser.vars());
++                record(streams, &[L!("F"), &face_to_zsh(&face)]);
++            }
++        }
 +        _ => return bad,
 +    }
 +    Ok(SUCCESS)
 +}
--- 
-2.55.0
-
++
++// ---------------------------------------------------------------------------
++// zsh-correct insertion of completions.
++//
++// `zsh_apply` is Reader's completion_apply_to_command_line with only the
++// quoting layer swapped: escaping and quote detection follow zsh's lexer
++// instead of fish's (zsh single quotes take no escapes; `?`, `!`, `` ` ``,
++// `^`/`#` (extendedglob) and a leading `=` are special; control characters
++// need $'...'). Everything else (token/suffix/slash/trailing-quote logic) is
++// fish's code unchanged.
++
++#[derive(Clone, Copy, Default)]
++struct ZshOpts {
++    extended_glob: bool,
++    bang_hist: bool,
++}
++
++impl ZshOpts {
++    fn parse(s: &wstr) -> Self {
++        let s = s.to_string();
++        ZshOpts {
++            extended_glob: s.contains('e'),
++            bang_hist: s.contains('h'),
++        }
++    }
++}
++
++/// $'...' spelling of a control character or raw byte (zsh cannot backslash-escape
++/// these outside of $'...').
++fn zsh_ansi_c(c: char) -> WString {
++    if let Some(byte) = decode_byte_from_char(c) {
++        return format!("$'\\x{byte:02X}'").into();
++    }
++    let inner: String = match c {
++        '\t' => "\\t".into(),
++        '\n' => "\\n".into(),
++        '\x08' => "\\b".into(),
++        '\r' => "\\r".into(),
++        '\x1B' => "\\e".into(),
++        '\x7F' => "\\x7f".into(),
++        c => format!("\\x{:02x}", u32::from(c)),
++    };
++    format!("$'{inner}'").into()
++}
++
++fn is_zsh_control(c: char) -> bool {
++    decode_byte_from_char(c).is_some() || matches!(c, '\x00'..='\x19' | '\x1B' | '\x7F')
++}
++
++/// fish's escape_string_script with zsh's special-character set.
++fn zsh_escape_script(input: &wstr, flags: EscapeFlags, z: ZshOpts) -> WString {
++    let escape_printables = !flags.no_printables;
++    let mut need_escape = false;
++    let mut need_complex_escape = flags.no_tilde && input.char_at(0) == '~';
++    let (mut double_quotes, mut single_quotes, mut dollars) = (0, 0, 0);
++    let mut has_bang = false;
++
++    if !flags.no_quoted && input.is_empty() {
++        return L!("''").to_owned();
++    }
++
++    let mut out = WString::with_capacity(input.len());
++    for (i, c) in input.chars().enumerate() {
++        if is_zsh_control(c) {
++            out.push_utfstr(&zsh_ansi_c(c));
++            need_escape = true;
++            need_complex_escape = true;
++            continue;
++        }
++        match c {
++            '\\' | '\'' => {
++                need_escape = true;
++                if c == '\'' {
++                    single_quotes += 1;
++                }
++                if escape_printables || c == '\\' {
++                    out.push('\\');
++                }
++                out.push(c);
++            }
++            fish_widestring::ANY_CHAR => out.push('?'),
++            fish_widestring::ANY_STRING => out.push('*'),
++            fish_widestring::ANY_STRING_RECURSIVE => out.push_str("**"),
++            ',' => {
++                if flags.comma {
++                    need_escape = true;
++                    out.push('\\');
++                }
++                out.push(c);
++            }
++            '&' | '$' | ' ' | '#' | '<' | '>' | '(' | ')' | '[' | ']' | '{' | '}' | '?' | '*'
++            | '|' | ';' | '"' | '%' | '~' | '`' | '!' | '^' | '=' => {
++                if c == '"' {
++                    double_quotes += 1;
++                }
++                if c == '$' {
++                    dollars += 1;
++                }
++                if c == '!' {
++                    has_bang = true;
++                }
++                let prev_alnum = i
++                    .checked_sub(1)
++                    .is_some_and(|p| input.char_at(p).is_alphanumeric());
++                let char_is_normal = match c {
++                    '~' => flags.no_tilde,
++                    '#' => prev_alnum && !z.extended_glob,
++                    '!' => !z.bang_hist,
++                    '^' => !z.extended_glob,
++                    '=' => i != 0, // EQUALS: only a leading '=' is special
++                    _ => false,
++                };
++                if !char_is_normal {
++                    need_escape = true;
++                    if escape_printables {
++                        out.push('\\');
++                    }
++                }
++                out.push(c);
++            }
++            _ => out.push(c),
++        }
++    }
++
++    if !flags.no_quoted && need_escape && !need_complex_escape && escape_printables {
++        // Same choice as fish, except that a history-expanding '!' cannot be
++        // escaped inside zsh double quotes, so single quotes win then.
++        let quote = if single_quotes > double_quotes + dollars && !(has_bang && z.bang_hist) {
++            '"'
++        } else {
++            '\''
++        };
++        out.clear();
++        out.push(quote);
++        out.push_utfstr(&zsh_escape_with_quote(input, Some(quote), EscapeFlags::default(), z));
++        out.push(quote);
++    }
++    out
++}
++
++/// fish's escape_string_with_quote for zsh quoting rules.
++fn zsh_escape_with_quote(cmd: &wstr, quote: Option<char>, flags: EscapeFlags, z: ZshOpts) -> WString {
++    let Some(quote) = quote else {
++        return zsh_escape_script(cmd, flags, z);
++    };
++    let mut result = WString::with_capacity(cmd.len());
++    for c in cmd.chars() {
++        if is_zsh_control(c) {
++            // Leave the quote, spell the character, re-enter the quote.
++            result.push(quote);
++            result.push_utfstr(&zsh_ansi_c(c));
++            result.push(quote);
++            continue;
++        }
++        match (quote, c) {
++            ('\'', '\'') => result.push_str("'\\''"),
++            ('"', '\\' | '"' | '$' | '`') => {
++                result.push('\\');
++                result.push(c);
++            }
++            ('"', '!') if z.bang_hist => {
++                // Cannot be escaped inside zsh double quotes: close, escape, reopen.
++                result.push_str("\"\\!\"");
++            }
++            _ => result.push(c),
++        }
++    }
++    result
++}
++
++/// zsh lexer state at each position: which quote (if any) is open *before* pos.
++fn zsh_quote_state(s: &wstr, upto: usize) -> Option<char> {
++    let cs = s.as_char_slice();
++    let mut q: Option<char> = None;
++    let mut i = 0;
++    while i < upto.min(cs.len()) {
++        let c = cs[i];
++        match q {
++            None => match c {
++                '\\' => i += 1,
++                '\'' | '"' => q = Some(c),
++                _ => {}
++            },
++            Some('\'') => {
++                if c == '\'' {
++                    q = None;
++                }
++            }
++            Some(_) => match c {
++                '\\' => i += 1,
++                '"' => q = None,
++                _ => {}
++            },
++        }
++        i += 1;
++    }
++    q
++}
++
++/// get_quote for zsh: the quote still open at offset `len` of the token.
++fn zsh_get_quote(tok: &wstr, len: usize) -> Option<char> {
++    zsh_quote_state(tok, len)
++}
++
++/// unescaped_quote for zsh: is s[pos] a quote character that acts as a quote?
++fn zsh_unescaped_quote(s: &wstr, pos: usize) -> Option<char> {
++    let c = *s.as_char_slice().get(pos)?;
++    if !matches!(c, '\'' | '"') {
++        return None;
++    }
++    match zsh_quote_state(s, pos) {
++        // Unquoted: a quote counts unless backslash-escaped.
++        None => (!is_backslashed(s, pos)).then_some(c),
++        // Inside a quote: only the matching closing quote counts.
++        Some('\'') => (c == '\'').then_some(c),
++        Some(_) => (c == '"' && !is_backslashed(s, pos)).then_some(c),
++    }
++}
++
++fn parse_flags(code: &wstr) -> Option<CompleteFlags> {
++    let c: Vec<char> = code.chars().collect();
++    if c.len() != 6 {
++        return None;
++    }
++    let mut f = CompleteFlags::default();
++    f.replaces = match c[0] {
++        'n' => None,
++        'T' => Some(ReplacementScope::Token(WillReplaceToken { show_pager_prefix: true })),
++        't' => Some(ReplacementScope::Token(WillReplaceToken { show_pager_prefix: false })),
++        'L' => Some(ReplacementScope::Line),
++        _ => return None,
++    };
++    f.wants_suffix = match c[1] {
++        'n' => WantsSuffix::No,
++        's' => WantsSuffix::Yes(crate::complete::SuffixType { for_variable_name: false }),
++        'v' => WantsSuffix::Yes(crate::complete::SuffixType { for_variable_name: true }),
++        _ => return None,
++    };
++    f.wants_escaping = match c[2] {
++        'n' => WantsEscaping::No,
++        't' => WantsEscaping::Yes { escape_tildes: true },
++        'k' => WantsEscaping::Yes { escape_tildes: false },
++        _ => return None,
++    };
++    f.keep_variable_override_prefix = c[3] == '1';
++    f.duplicates_argument = c[4] == '1';
++    f.dont_sort = c[5] == '1';
++    Some(f)
++}
++
++/// Reader's completion_apply_to_command_line, zsh quoting layer.
++fn zsh_apply(
++    ctx: &mut OperationContext,
++    val_str: &wstr,
++    flags: CompleteFlags,
++    command_line: &wstr,
++    inout_cursor_pos: &mut usize,
++    append_only: bool,
++    is_unique: bool,
++    z: ZshOpts,
++) -> WString {
++    let cursor_pos = *inout_cursor_pos;
++    let mut back_into_trailing_quote = false;
++
++    let mut suffix_builder = flags.suffix_type().map(|suffix_type| (suffix_type, ' '));
++    let have_suffix = command_line.char_at(cursor_pos) == ' ';
++    let escape_flags = match flags.wants_escaping {
++        WantsEscaping::Yes { escape_tildes } => {
++            let mut escape_flags = EscapeFlags::default();
++            if append_only || !is_unique || suffix_builder.is_none() {
++                escape_flags.no_quoted = true;
++            }
++            if !escape_tildes {
++                escape_flags.no_tilde = true;
++            }
++            Some(escape_flags)
++        }
++        WantsEscaping::No => None,
++    };
++    let keep_variable_override = flags.keep_variable_override_prefix;
++
++    if flags.replaces_line() {
++        let cmdsub = get_cmdsubst_extent(command_line, cursor_pos);
++        return if !command_line[cmdsub.clone()].contains('\n') {
++            *inout_cursor_pos = cmdsub.start + val_str.len();
++            command_line[..cmdsub.start].to_owned() + val_str + &command_line[cmdsub.end..]
++        } else {
++            replace_line_at_cursor(command_line, inout_cursor_pos, val_str)
++        };
++    }
++
++    let mut maybe_add_slash = |suffix: &mut char, token: &wstr| {
++        let mut expanded = token.to_owned();
++        if expand_one(&mut expanded, ExpandFlags::FAIL_ON_CMDSUBST, ctx, None)
++            && wstat(&expanded).is_ok_and(|md| md.is_dir())
++        {
++            *suffix = '/';
++        }
++    };
++
++    if flags.replaces_token() {
++        if let Some((suffix_type, suffix)) = suffix_builder.as_mut() {
++            if suffix_type.for_variable_name {
++                maybe_add_slash(suffix, val_str);
++            }
++        }
++        let mut move_cursor = 0;
++        let (range, _) = get_token_extent(command_line, cursor_pos);
++        let mut sb = command_line[..range.start].to_owned();
++        if keep_variable_override {
++            let tok = &command_line[range.clone()];
++            if let Some(separator_pos) = variable_assignment_equals_pos(tok) {
++                let key = &tok[..=separator_pos];
++                sb.push_utfstr(key);
++                move_cursor += key.len();
++            }
++        }
++        if let Some(escape_flags) = escape_flags {
++            let escaped = zsh_escape_script(val_str, escape_flags, z);
++            sb.push_utfstr(&escaped);
++            move_cursor += escaped.len();
++        } else {
++            sb.push_utfstr(val_str);
++            move_cursor += val_str.len();
++        }
++        if let Some((_st, suffix)) = suffix_builder {
++            if !have_suffix {
++                sb.push(suffix);
++            }
++            move_cursor += 1;
++        }
++        sb.push_utfstr(&command_line[range.end..]);
++        *inout_cursor_pos = range.start + move_cursor;
++        return sb;
++    }
++
++    let mut quote = None;
++    let replaced = if let Some(mut escape_flags) = escape_flags {
++        let (tok, _) = get_token_extent(command_line, cursor_pos);
++        let mut have_token = false;
++        if tok.contains(&cursor_pos) || cursor_pos == tok.end {
++            quote = zsh_get_quote(&command_line[tok.clone()], cursor_pos - tok.start);
++            have_token = !tok.is_empty();
++        }
++        if quote.is_none() && !append_only && cursor_pos > 0 {
++            let trailing_quote = zsh_unescaped_quote(command_line, cursor_pos - 1);
++            if trailing_quote.is_some() {
++                quote = trailing_quote;
++                back_into_trailing_quote = true;
++            }
++        }
++        if have_token {
++            escape_flags.no_quoted = true;
++        }
++        zsh_escape_with_quote(val_str, quote, escape_flags, z)
++    } else {
++        val_str.to_owned()
++    };
++
++    let mut insertion_point = cursor_pos;
++    if back_into_trailing_quote {
++        insertion_point -= 1;
++    }
++    let mut result = command_line.to_owned();
++    result.insert_utfstr(insertion_point, &replaced);
++    let mut new_cursor_pos =
++        insertion_point + replaced.len() + if back_into_trailing_quote { 1 } else { 0 };
++    if let Some((suffix_type, mut suffix)) = suffix_builder {
++        if suffix_type.for_variable_name {
++            let (tok, _) = get_token_extent(command_line, cursor_pos);
++            maybe_add_slash(&mut suffix, &result[tok.start..new_cursor_pos]);
++        }
++        if suffix != '/' {
++            if let Some(quote) = quote {
++                if zsh_unescaped_quote(command_line, insertion_point) != Some(quote) {
++                    result.insert(new_cursor_pos, quote);
++                    new_cursor_pos += 1;
++                }
++            }
++        }
++        if !have_suffix {
++            result.insert(new_cursor_pos, suffix);
++        }
++        new_cursor_pos += 1;
++    }
++    *inout_cursor_pos = new_cursor_pos;
++    result
++}

@@ -156,21 +156,21 @@ def build_home(shell: str) -> Path:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(f"{entry}\n")
 
+    # Both shells get the same fish config + fish history: zsh's fishy server
+    # is a (non-interactive) fish that reads them exactly like the reference.
     base = 1_760_000_000
-    match shell:
-        case "fish":
-            cfg = home / ".config" / "fish"
-            cfg.mkdir(parents=True)
-            shutil.copy(ROOT / "harness" / "fish-config.fish", cfg / "config.fish")
-            data = home / ".local" / "share" / "fish"
-            data.mkdir(parents=True)
-            lines = []
-            for i, cmd in enumerate(HISTORY):
-                esc = cmd.replace("\\", "\\\\")
-                lines.append(f"- cmd: {esc}\n  when: {base + i}\n")
-            (data / "fish_history").write_text("".join(lines))
-        case "zsh":
-            (home / ".zsh_history").write_text("".join(f"{c}\n" for c in HISTORY))
+    cfg = home / ".config" / "fish"
+    cfg.mkdir(parents=True)
+    shutil.copy(ROOT / "harness" / "fish-config.fish", cfg / "config.fish")
+    data = home / ".local" / "share" / "fish"
+    data.mkdir(parents=True)
+    lines = []
+    for i, cmd in enumerate(HISTORY):
+        esc = cmd.replace("\\", "\\\\")
+        lines.append(f"- cmd: {esc}\n  when: {base + i}\n")
+    (data / "fish_history").write_text("".join(lines))
+    if shell == "zsh":
+        (home / ".zsh_history").write_text("".join(f"{c}\n" for c in HISTORY))
     return home
 
 
@@ -186,6 +186,9 @@ def shell_env(shell: str, home: Path) -> dict[str, str]:
         "XDG_CONFIG_HOME": str(home / ".config"),
         "XDG_CACHE_HOME": str(home / ".cache"),
         "FISHY_ROOT": str(ROOT),
+        # Patched fish for zsh's server: the nix build, or a dev cargo build.
+        "FISHY_FISH": os.environ.get("FISHY_DEV_FISH", str(DEPS / "bin" / "fishy-fish")),
+        "FISHY_LOG": os.environ.get("FISHY_LOG", ""),
         # Ghostty-provided
         "TERM": "xterm-ghostty",
         "TERMINFO": str(GHOSTTY / "Resources" / "terminfo"),

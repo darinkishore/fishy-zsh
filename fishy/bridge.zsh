@@ -20,6 +20,9 @@ typeset -ga fishy_reply
 
 : ${FISHY_FISH:=fishy-fish}
 
+# Debug log: export FISHY_LOG=/path/to/file to trace bridge and reader events.
+fishy-log() { [[ -n $FISHY_LOG ]] && print -r -- "$EPOCHREALTIME $*" >>$FISHY_LOG; return 0 }
+
 _fishy_start() {
   emulate -L zsh
   local name=$1 dir wfd rfd
@@ -27,7 +30,9 @@ _fishy_start() {
   command mkfifo -m 600 $dir/req $dir/resp || { command rm -rf $dir; return 1 }
   # The child opens req (read) then resp (write); we open in the same order,
   # so neither side can deadlock on the other's open().
-  $FISHY_FISH -c "source ${(q)FISHY_DIR}/server.fish" <$dir/req >$dir/resp 2>/dev/null &!
+  # Force fish's default theme (normally interactive-only, share/config.fish)
+  # so the server can resolve colors exactly like interactive fish.
+  __fish_force_load_default_theme=1 $FISHY_FISH -c "source ${(q)FISHY_DIR}/server.fish" <$dir/req >$dir/resp 2>/dev/null &!
   _fishy_pid[$name]="$!"
   exec {wfd}>$dir/req {rfd}<$dir/resp
   command rm -rf $dir
@@ -102,6 +107,7 @@ fishy-send() {
   _fishy_ensure $name || return 1
   _fishy_sync_env $name || return 1
   _fishy_write $name "$@"
+  fishy-log "send[$name] id=$REPLY $1"
 }
 
 fishy-call() {
