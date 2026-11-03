@@ -1,0 +1,525 @@
+From ec53e7b3498f9a05127f644da6e9d0bd0498fe14 Mon Sep 17 00:00:00 2001
+From: darin <darin@mcptesting.com>
+Date: Tue, 3 Nov 2026 13:44:04 -0800
+Subject: [PATCH] fishy: __fishy builtin exposing reader
+ completion/autosuggest/history/word logic
+
+---
+ src/builtins/shared/misc.rs |   4 +
+ src/reader/reader.rs        |   4 +
+ src/reader/reader/fishy.rs  | 473 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 481 insertions(+)
+ create mode 100644 src/reader/reader/fishy.rs
+
+diff --git a/src/builtins/shared/misc.rs b/src/builtins/shared/misc.rs
+index 39ee74d9e..465303e12 100644
+--- a/src/builtins/shared/misc.rs
++++ b/src/builtins/shared/misc.rs
+@@ -129,6 +129,10 @@ struct BuiltinData {
+         name: L!("_"),
+         func: gettext::gettext,
+     },
++    BuiltinData {
++        name: L!("__fishy"),
++        func: crate::reader::fishy_builtin,
++    },
+     BuiltinData {
+         name: L!("abbr"),
+         func: abbr::abbr,
+diff --git a/src/reader/reader.rs b/src/reader/reader.rs
+index 87803da12..0115d126c 100644
+--- a/src/reader/reader.rs
++++ b/src/reader/reader.rs
+@@ -7251,6 +7251,10 @@ fn completion_insert(
+     }
+ }
+ 
++// fishy-zsh: headless reader logic for driving fish behavior from zsh.
++mod fishy;
++pub use fishy::fishy as fishy_builtin;
++
+ #[cfg(test)]
+ mod tests {
+     use super::{combine_command_and_autosuggestion, completion_apply_to_command_line};
+diff --git a/src/reader/reader/fishy.rs b/src/reader/reader/fishy.rs
+new file mode 100644
+index 000000000..0909a1f0a
+--- /dev/null
++++ b/src/reader/reader/fishy.rs
+@@ -0,0 +1,473 @@
++//! `__fishy`: headless access to the reader's completion, autosuggestion, word
++//! motion and history logic, so another line editor (zsh, via fishy-zsh) can
++//! reproduce fish's interactive behavior exactly instead of approximating it.
++//!
++//! Every reply record is NUL-terminated; fields are separated by \x1f.
++//! Offsets are in characters (code points), matching zsh's $CURSOR with
++//! MULTIBYTE set.
++//!
++//!   __fishy complete CURSOR LINE
++//!       T tok_start tok_end cmdsub_start cmdsub_end
++//!       then either  W expanded   (wildcard expanded in place)
++//!       or           F            (wildcard overflow / cancel: flash, nothing else)
++//!       or zero or more
++//!                    C raw display desc flags match rank
++//!   __fishy suggest CURSOR LINE
++//!       S text range_start range_end icase_codepoints|-1 is_whole(0/1)
++//!   __fishy history-add CWD TEXT        add like the reader does on execute
++//!   __fishy history-resolve             make pending items searchable + save
++//!   __fishy hsearch-reset MODE TOKEN_OFFSET TEXT [SKIP]
++//!   __fishy hsearch-move b|f|oldest|present
++//!       H found(0/1) at_present(0/1) result res_start res_end match_start|-1 match_len
++//!   __fishy word DIR STYLE TO_END POS TEXT       (DIR=l|r, STYLE=p|c|w)
++//!       P new_pos
++//!   __fishy accept-word STYLE TO_END HAVE TEXT   (autosuggestion portion)
++//!       P want
++
++use super::*;
++use crate::builtins::{BuiltinResult, STATUS_INVALID_ARGS, SUCCESS};
++use crate::io::IoStreams;
++use fish_wcstringutil::ContainType;
++use std::cell::RefCell;
++
++thread_local! {
++    static HSEARCH: RefCell<ReaderHistorySearch> = RefCell::new(ReaderHistorySearch::default());
++}
++
++const RS: char = '\x1f';
++
++fn record(streams: &mut IoStreams, fields: &[&wstr]) {
++    let mut out = WString::new();
++    for (i, f) in fields.iter().enumerate() {
++        if i > 0 {
++            out.push(RS);
++        }
++        out.push_utfstr(f);
++    }
++    out.push('\0');
++    streams.out.append(&out);
++}
++
++fn num(n: usize) -> WString {
++    n.to_string().into()
++}
++
++fn parse_usize(s: &wstr) -> Option<usize> {
++    s.to_string().parse().ok()
++}
++
++fn history(parser: &Parser) -> Arc<History> {
++    History::new(history_id(parser.vars()))
++}
++
++fn flags_code(c: &Completion) -> WString {
++    let f = &c.flags;
++    let replaces = match f.replaces {
++        None => 'n',
++        Some(ReplacementScope::Token(WillReplaceToken { show_pager_prefix: true })) => 'T',
++        Some(ReplacementScope::Token(WillReplaceToken { show_pager_prefix: false })) => 't',
++        Some(ReplacementScope::Line) => 'L',
++    };
++    let suffix = match f.wants_suffix {
++        WantsSuffix::No => 'n',
++        WantsSuffix::Yes(st) if st.for_variable_name => 'v',
++        WantsSuffix::Yes(_) => 's',
++        WantsSuffix::Auto => 'a', // resolved in Completion::new; never expected here
++    };
++    let escaping = match f.wants_escaping {
++        WantsEscaping::No => 'n',
++        WantsEscaping::Yes { escape_tildes: true } => 't',
++        WantsEscaping::Yes { escape_tildes: false } => 'k',
++    };
++    let b = |v: bool| if v { '1' } else { '0' };
++    [
++        replaces,
++        suffix,
++        escaping,
++        b(f.keep_variable_override_prefix),
++        b(f.duplicates_argument),
++        b(f.dont_sort),
++    ]
++    .into_iter()
++    .collect()
++}
++
++fn match_code(m: &StringFuzzyMatch) -> WString {
++    let typ = match m.typ {
++        ContainType::Exact => 'x',
++        ContainType::Prefix => 'p',
++        ContainType::Substr => 's',
++        ContainType::Subseq => 'q',
++    };
++    let case = match m.case_fold {
++        CaseSensitivity::Sensitive => 's',
++        CaseSensitivity::Smart => 'm',
++        CaseSensitivity::Insensitive => 'i',
++    };
++    [typ, case, if m.from_separator { '1' } else { '0' }]
++        .into_iter()
++        .collect()
++}
++
++/// Mirrors Reader::compute_and_apply_completions up to handle_completions.
++fn do_complete(parser: &mut Parser, streams: &mut IoStreams, cursor: usize, line: &wstr) {
++    let cursor = cursor.min(line.len());
++    let cmdsub_range = get_cmdsubst_extent(line, cursor);
++    let position_in_cmdsub = cursor - cmdsub_range.start;
++    let (mut token_range, _) = get_token_extent(&line[cmdsub_range.clone()], position_in_cmdsub);
++    let position_in_token = position_in_cmdsub - token_range.start;
++    if token_range.end > cmdsub_range.len() {
++        token_range.end = cmdsub_range.len();
++    }
++    token_range.start += cmdsub_range.start;
++    token_range.end += cmdsub_range.start;
++    record(
++        streams,
++        &[
++            L!("T"),
++            &num(token_range.start),
++            &num(token_range.end),
++            &num(cmdsub_range.start),
++            &num(cmdsub_range.end),
++        ],
++    );
++
++    let mut wc_expanded = WString::new();
++    match try_expand_wildcard(
++        parser,
++        line[token_range.clone()].to_owned(),
++        position_in_token,
++        &mut wc_expanded,
++    ) {
++        ExpandResultCode::Error | ExpandResultCode::WildcardNoMatch => {}
++        ExpandResultCode::Overflow | ExpandResultCode::Cancel => {
++            record(streams, &[L!("F")]);
++            return;
++        }
++        ExpandResultCode::Ok => {
++            record(streams, &[L!("W"), &wc_expanded]);
++            return;
++        }
++    }
++
++    let options = CompletionRequestOptions::default();
++    let (mut comp, _needs_load) = complete(
++        &line[cmdsub_range.start..token_range.end],
++        options,
++        &mut parser.context(),
++    );
++    sort_and_prioritize(&mut comp, options);
++
++    for c in &comp {
++        let display = escape_string(
++            &c.completion,
++            EscapeStringStyle::Script(EscapeFlags {
++                no_printables: true,
++                no_quoted: true,
++                symbolic: true,
++                ..Default::default()
++            }),
++        );
++        record(
++            streams,
++            &[
++                L!("C"),
++                &c.completion,
++                &display,
++                &c.description,
++                &flags_code(c),
++                &match_code(&c.r#match),
++                &num(c.rank() as usize),
++            ],
++        );
++    }
++}
++
++/// Runs the reader's own autosuggestion performer, including the reload-and-retry
++/// dance from Reader::autosuggest_completed when completions need loading.
++fn do_suggest(parser: &mut Parser, streams: &mut IoStreams, cursor: usize, line: &wstr) {
++    let cursor = cursor.min(line.len());
++    let hist = history(parser);
++    // The performer asserts it runs off the main thread, as in the reader.
++    let result = loop {
++        let performer = get_autosuggestion_performer(parser, line.to_owned(), cursor, hist.clone());
++        let result = std::thread::spawn(performer).join().expect("autosuggest thread panicked");
++        let mut loaded_new = false;
++        for to_load in &result.needs_load {
++            loaded_new |= complete_load(to_load, parser);
++        }
++        if !loaded_new {
++            break result;
++        }
++    };
++    let a = &result.autosuggestion;
++    let icase = match a.icase_matched_codepoints {
++        Some(n) => num(n),
++        None => L!("-1").to_owned(),
++    };
++    record(
++        streams,
++        &[
++            L!("S"),
++            &a.text,
++            &num(a.search_string_range.start),
++            &num(a.search_string_range.end),
++            &icase,
++            if a.is_whole_item_from_history { L!("1") } else { L!("0") },
++        ],
++    );
++}
++
++/// Mirrors Reader::add_to_history (minus the reader-only silent mode).
++fn do_history_add(parser: &mut Parser, text: &wstr) {
++    let mut text = text.to_owned();
++    // Historical behavior is to trim trailing spaces, unless escaped (#7661).
++    while text
++        .chars()
++        .next_back()
++        .is_some_and(|c| matches!(c, ' ' | '\n'))
++        && count_preceding_backslashes(&text, text.len() - 1) % 2 == 0
++    {
++        text.pop();
++    }
++    let hist = history(parser);
++    hist.remove_ephemeral_items();
++    if text.is_empty() {
++        return;
++    }
++    let should_add = if !function::exists(L!("fish_should_add_to_history"), parser) {
++        text.as_char_slice()[0] != ' '
++    } else {
++        let mut cmd: WString = L!("fish_should_add_to_history ").into();
++        cmd.push_utfstr(&escape(&text));
++        let _not_interactive = parser.push_scope(|s| s.is_interactive = false);
++        exec_subshell(&cmd, parser, None, false).is_ok()
++    };
++    let mode = if !should_add {
++        PersistenceMode::Ephemeral
++    } else if in_private_mode(parser.vars()) {
++        PersistenceMode::Memory
++    } else {
++        PersistenceMode::Disk
++    };
++    hist.add_pending_with_file_detection(&text, &parser.variables, mode);
++}
++
++fn parse_mode(s: &wstr) -> Option<SearchMode> {
++    Some(match s.to_string().as_str() {
++        "line" => SearchMode::Line,
++        "prefix" => SearchMode::Prefix,
++        "token" => SearchMode::Token,
++        "last-token" => SearchMode::LastToken,
++        _ => return None,
++    })
++}
++
++fn hsearch_report(streams: &mut IoStreams, found: bool) {
++    HSEARCH.with_borrow(|hs| {
++        if !hs.active() {
++            record(streams, &[L!("H"), L!("0"), L!("1"), L!(""), L!("0"), L!("0"), L!("-1"), L!("0")]);
++            return;
++        }
++        let res = hs.search_result_range();
++        let (mstart, mlen) = match hs.search_range_if_active() {
++            Some(r) => (num(r.start()), num(r.length())),
++            None => (L!("-1").to_owned(), L!("0").to_owned()),
++        };
++        record(
++            streams,
++            &[
++                L!("H"),
++                if found { L!("1") } else { L!("0") },
++                if hs.is_at_present() { L!("1") } else { L!("0") },
++                hs.current_result(),
++                &num(res.start),
++                &num(res.end),
++                &mstart,
++                &mlen,
++            ],
++        );
++    });
++}
++
++fn parse_style(s: &wstr) -> Option<MoveWordStyle> {
++    Some(match s.to_string().as_str() {
++        "p" => MoveWordStyle::Punctuation,
++        "c" => MoveWordStyle::PathComponents,
++        "w" => MoveWordStyle::Whitespace,
++        _ => return None,
++    })
++}
++
++/// Mirrors the cursor arithmetic of Reader::move_word for an arbitrary text/pos.
++fn word_motion(
++    text: &wstr,
++    pos: usize,
++    direction: MoveWordDir,
++    style: MoveWordStyle,
++    to_word_end: bool,
++) -> usize {
++    let move_right = direction == MoveWordDir::Right;
++    let state_machine_dir = if to_word_end {
++        match direction {
++            MoveWordDir::Left => MoveWordDir::Right,
++            MoveWordDir::Right => MoveWordDir::Left,
++        }
++    } else {
++        direction
++    };
++    let len = text.len();
++    let boundary = if move_right { len } else { 0 };
++    if pos == boundary {
++        return pos;
++    }
++    let mut state = MoveWordStateMachine::new(style, state_machine_dir);
++    let mut buff_pos = pos;
++    let end = if move_right {
++        if to_word_end { len - 1 } else { len }
++    } else if to_word_end {
++        usize::MAX
++    } else {
++        0
++    };
++    while buff_pos != end {
++        if buff_pos == len && (move_right || to_word_end) {
++            if !move_right && to_word_end && buff_pos != 0 {
++                buff_pos -= 1;
++            } else {
++                break;
++            }
++        }
++        let char_pos = if move_right {
++            if to_word_end { buff_pos + 1 } else { buff_pos }
++        } else if to_word_end {
++            buff_pos
++        } else {
++            buff_pos.wrapping_sub(1)
++        };
++        if state.consume_char(text, char_pos) {
++            buff_pos = if move_right {
++                buff_pos + 1
++            } else {
++                buff_pos.wrapping_sub(1)
++            };
++        } else {
++            break;
++        }
++    }
++    // Reader::move_word: "If we're moving left and went past the beginning, clamp" etc.
++    if buff_pos == usize::MAX {
++        buff_pos = 0;
++    }
++    buff_pos.min(len)
++}
++
++pub fn fishy(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) -> BuiltinResult {
++    let args: Vec<WString> = argv.iter().map(|a| (*a).to_owned()).collect();
++    let arg = |i: usize| args.get(i).map(|s| s.as_utfstr());
++    let bad = Err(STATUS_INVALID_ARGS);
++    match arg(1).map(|s| s.to_string()).as_deref() {
++        Some("complete") => {
++            let (Some(cur), Some(line)) = (arg(2).and_then(parse_usize), arg(3)) else {
++                return bad;
++            };
++            do_complete(parser, streams, cur, line);
++        }
++        Some("suggest") => {
++            let (Some(cur), Some(line)) = (arg(2).and_then(parse_usize), arg(3)) else {
++                return bad;
++            };
++            do_suggest(parser, streams, cur, line);
++        }
++        Some("history-add") => {
++            let (Some(_cwd), Some(text)) = (arg(2), arg(3)) else {
++                return bad;
++            };
++            do_history_add(parser, text);
++        }
++        Some("history-resolve") => {
++            let hist = history(parser);
++            hist.resolve_pending();
++            hist.save();
++        }
++        Some("hsearch-reset") => {
++            let (Some(mode), Some(off), Some(text)) =
++                (arg(2).and_then(parse_mode), arg(3).and_then(parse_usize), arg(4))
++            else {
++                return bad;
++            };
++            let hist = history(parser);
++            HSEARCH.with_borrow_mut(|hs| {
++                hs.reset_to_mode(text.to_owned(), hist, mode, off);
++                if let Some(skip) = arg(5) {
++                    if !skip.is_empty() {
++                        hs.add_skip(skip.to_owned());
++                    }
++                }
++            });
++            hsearch_report(streams, true);
++        }
++        Some("hsearch-move") => {
++            let found = HSEARCH.with_borrow_mut(|hs| {
++                if !hs.active() {
++                    return false;
++                }
++                match arg(2).map(|s| s.to_string()).as_deref() {
++                    Some("b") => hs.move_in_direction(SearchDirection::Backward),
++                    Some("f") => hs.move_in_direction(SearchDirection::Forward),
++                    Some("oldest") => {
++                        hs.go_to_oldest();
++                        true
++                    }
++                    Some("present") => {
++                        hs.go_to_present();
++                        true
++                    }
++                    _ => false,
++                }
++            });
++            hsearch_report(streams, found);
++        }
++        Some("hsearch-end") => {
++            HSEARCH.with_borrow_mut(|hs| hs.reset());
++        }
++        Some("word") => {
++            let (Some(dir), Some(style), Some(to_end), Some(pos), Some(text)) = (
++                arg(2),
++                arg(3).and_then(parse_style),
++                arg(4),
++                arg(5).and_then(parse_usize),
++                arg(6),
++            ) else {
++                return bad;
++            };
++            let dir = if dir == "l" { MoveWordDir::Left } else { MoveWordDir::Right };
++            let p = word_motion(text, pos.min(text.len()), dir, style, to_end == "1");
++            record(streams, &[L!("P"), &num(p)]);
++        }
++        Some("accept-word") => {
++            // Mirrors AutosuggestionPortion::PerMoveWordStyle in accept_autosuggestion.
++            let (Some(style), Some(to_end), Some(have), Some(text)) = (
++                arg(2).and_then(parse_style),
++                arg(3),
++                arg(4).and_then(parse_usize),
++                arg(5),
++            ) else {
++                return bad;
++            };
++            let dir = if to_end == "1" { MoveWordDir::Left } else { MoveWordDir::Right };
++            let mut state = MoveWordStateMachine::new(style, dir);
++            let mut want = have.min(text.len());
++            while want < text.len() {
++                if state.consume_char(text, want) {
++                    want += 1;
++                } else {
++                    break;
++                }
++            }
++            record(streams, &[L!("P"), &num(want)]);
++        }
++        _ => return bad,
++    }
++    Ok(SUCCESS)
++}
+-- 
+2.55.0
+
