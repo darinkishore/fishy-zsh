@@ -30,6 +30,10 @@ if [[ -n $GHOSTTY_SHELL_FEATURES && $FISHY_GHOSTTY_CURSOR != 1 ]]; then
   GHOSTTY_SHELL_FEATURES=${(j:,:)${(@)${(s:,:)GHOSTTY_SHELL_FEATURES}:#cursor*}}
 fi
 
+# fish reads ctrl-s (pager-toggle-search) and ctrl-q; don't let the tty eat
+# them as XOFF/XON flow control.
+setopt no_flow_control
+
 # fish_escape_delay_ms defaults to 30ms; zsh's KEYTIMEOUT is in 1/100 s.
 KEYTIMEOUT=3
 
@@ -66,9 +70,12 @@ _fishy_line_init() {
   fishy-reader-line-init
 }
 
+# fish's final rendering keeps the syntax colors but drops the suggestion and
+# the pager.
 _fishy_line_finish() {
-  POSTDISPLAY=''
-  region_highlight=("${(@)region_highlight:#*memo=fishy}")
+  fishy-pager-clear
+  fishy-suggest-clear
+  fishy-render
 }
 
 zle -N fishy-async-ready _fishy_w_async_ready
@@ -79,6 +86,41 @@ autoload -Uz add-zsh-hook
 add-zsh-hook precmd _fishy_precmd
 
 fishy-keys-install
+
+# ctrl-c while editing: fish binds it to clear-commandline (clear in place, no
+# ^C, no new prompt). zsh delivers it as SIGINT, and a widget run from inside
+# the trap is cut short by the pending interrupt. So the trap only writes a
+# byte to a self-pipe watched with `zle -F`; zle's input wait wakes up and runs
+# the handler widget in a normal context.
+typeset -gi _fishy_intr_fd=-1
+_fishy_intr_setup() {
+  local fifo
+  fifo=$(command mktemp -u "${TMPDIR:-/tmp}/fishy-intr.XXXXXX") || return
+  command mkfifo -m 600 $fifo || return
+  exec {_fishy_intr_fd}<>$fifo      # O_RDWR on a FIFO never blocks or hits EOF
+  command rm -f $fifo
+  zle -F -w $_fishy_intr_fd fishy-intr-ready
+}
+_fishy_w_intr_ready() {
+  local byte
+  sysread -s 1 -i $_fishy_intr_fd byte 2>/dev/null
+  _fishy_w_ctrl_c
+}
+zle -N fishy-intr-ready _fishy_w_intr_ready
+_fishy_intr_setup
+
+functions[_fishy_prev_trapint]=${functions[TRAPINT]-}
+TRAPINT() {
+  if [[ -n $CONTEXT ]] && (( _fishy_intr_fd >= 0 )); then
+    syswrite -o $_fishy_intr_fd x 2>/dev/null
+    return 0
+  fi
+  if [[ -n ${functions[_fishy_prev_trapint]} ]]; then
+    _fishy_prev_trapint "$@"
+    return
+  fi
+  return $(( 128 + $1 ))
+}
 
 # Start both servers now so the first prompt never waits for fish to boot.
 _fishy_ensure sync

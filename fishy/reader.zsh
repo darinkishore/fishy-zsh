@@ -239,6 +239,7 @@ _fishy_only_rendering() {
 
 # fish: handle_char_event for a Readline event.
 _fishy_run() {
+  fishy-unswap
   local cmd=$1
   [[ $_fishy_last_cmd == (yank|yank-pop) ]] || _fishy_yank_len=0
   if [[ $cmd == cancel ]] && fishy-pager-navigating; then
@@ -260,8 +261,29 @@ _fishy_run() {
   fishy-highlight-update
 }
 
+# fish: read_normal_chars' accumulated insertion (note: unlike the Key event
+# path it does not reset the history search).
+_fishy_insert_batch() {
+  fishy-unswap
+  local text=$1
+  [[ $_fishy_last_cmd == (yank|yank-pop) ]] || _fishy_yank_len=0
+  if fishy-search-focused; then
+    _fp_search_text+=$text
+    fishy-pager-refilter
+    fishy-pager-selection-changed
+  else
+    fishy-push-edit $CURSOR $CURSOR "$text" $(( ! _fh_active ))
+    _fishy_transient='' _fs_suppress=0
+    fishy-pager-clear
+  fi
+  _fishy_last_cmd=''
+  fishy-suggest-update
+  fishy-highlight-update
+}
+
 # fish: handle_char_event for a Key event (self-insert). $1 = text to insert.
 _fishy_insert() {
+  fishy-unswap
   local text=$1
   [[ $_fishy_last_cmd == (yank|yank-pop) ]] || _fishy_yank_len=0
   if (( _fp_search_shown && _fp_selected >= 0 )); then
@@ -811,43 +833,74 @@ _fishy_render_pager() {
 
 typeset -g _fishy_sugg_disp=''
 
+# Pager search-field focus: zle can only put the cursor inside BUFFER, but fish
+# puts it on the "search:" line below the command line. While the field has
+# focus, each redraw shows the command line as PREDISPLAY, the field text as
+# BUFFER and the rest of the pager as POSTDISPLAY; every widget swaps back first.
+typeset -gi _fcl_swapped=0 _fcl_cursor=0
+typeset -g  _fcl_buffer=''
+fishy-unswap() {
+  (( _fcl_swapped )) || return 0
+  BUFFER=$_fcl_buffer CURSOR=$_fcl_cursor PREDISPLAY=''
+  _fcl_swapped=0
+}
+
 # zle-line-pre-redraw: compose POSTDISPLAY and region_highlight.
 fishy-render() {
   emulate -L zsh -o extendedglob
+  fishy-unswap
   region_highlight=("${(@)region_highlight:#*memo=fishy}")
   # Syntax colors first; suggestion/pager/search-match/flash entries follow and
   # take precedence where they overlap.
   fishy-highlight-entries
-  region_highlight+=("$reply[@]")
+  local -a syntax=("$reply[@]")
   fishy-suggest-display
   _fishy_sugg_disp=$REPLY
   local post=$REPLY
+  local -a extra=()
   local -i base=$(( ${#PREDISPLAY} + ${#BUFFER} ))
   if [[ -n $_fishy_sugg_disp ]]; then
     local spec=${_fishy_face[autosuggestion]:-fg=8}
     (( _fishy_flash_suggestion )) && spec=$_fishy_face[search_match]
-    region_highlight+=("P$base $(( base + ${#post} )) $spec memo=fishy")
+    extra+=("P$base $(( base + ${#post} )) $spec memo=fishy")
   fi
+  local -a plines=() starts=()
   if ! fishy-pager-is-empty; then
     _fishy_render_pager
+    plines=("$_fpr_lines[@]")
+  fi
+  if (( ${#plines} )) && fishy-search-focused; then
+    # Swapped layout: PREDISPLAY = command line + "\nsearch: ", BUFFER = field.
+    local cl=$BUFFER field=$_fp_search_text
+    _fcl_buffer=$BUFFER _fcl_cursor=$CURSOR _fcl_swapped=1
+    local pre=$cl$post$'\n'"search: "
+    local -i fieldw=$(( ${#field} < FISHY_PAGER_SEARCH_FIELD_WIDTH ? FISHY_PAGER_SEARCH_FIELD_WIDTH : ${#field} ))
+    local pad=${(l:fieldw-${#field}:: :)}
+    PREDISPLAY=$pre
+    BUFFER=$field CURSOR=${#field}
+    # Command-line syntax colors move into the PREDISPLAY region.
+    local e
+    for e in "$syntax[@]"; do region_highlight+=("P$e"); done
+    region_highlight+=("$extra[@]")
+    local -i fstart=${#pre}
+    local ul=${_fishy_face[search]:-underline}
+    region_highlight+=("P$fstart $(( fstart + fieldw )) $ul memo=fishy")
+    # Remaining pager lines (line 0 was the search field itself).
+    local -i off=$(( fstart + fieldw + 1 )) li
+    for (( li = 2; li <= ${#plines}; li++ )); do starts[li]=$off; (( off += ${#plines[li]} + 1 )); done
+    POSTDISPLAY=$pad
+    (( ${#plines} > 1 )) && POSTDISPLAY+=$'\n'${(pj:\n:)plines[2,-1]}
+    _fishy_pager_spans_to_rh 2
+    return
+  fi
+  region_highlight+=("$syntax[@]" "$extra[@]")
+  if (( ${#plines} )); then
     local -i off=$(( base + ${#post} + 1 )) li
-    local -a starts=()
-    for (( li = 1; li <= ${#_fpr_lines}; li++ )); do
-      starts+=($off)
-      (( off += ${#_fpr_lines[li]} + 1 ))
-    done
-    post+=$'\n'${(pj:\n:)_fpr_lines}
-    local sp
-    for sp in "$_fpr_spans[@]"; do
-      local -a s=(${=sp})
-      local face=${_fishy_face[$s[4]]}
-      [[ -z $face || $face == none ]] && continue
-      local -i st=$(( starts[s[1]+1] + s[2] )) en=$(( starts[s[1]+1] + s[3] ))
-      region_highlight+=("P$st $en $face memo=fishy")
-    done
+    for (( li = 1; li <= ${#plines}; li++ )); do starts[li]=$off; (( off += ${#plines[li]} + 1 )); done
+    post+=$'\n'${(pj:\n:)plines}
+    _fishy_pager_spans_to_rh 1
   fi
   POSTDISPLAY=$post
-  fishy-log "render post=[${post//$'\n'/\\n}] rh=${#region_highlight}"
   # History search match and flash highlight the command line itself.
   if (( _fh_active && ! _fh_at_present && _fh_match_start >= 0 )); then
     region_highlight+=("$(( _fh_match_start )) $(( _fh_match_start + _fh_match_len )) ${_fishy_face[search_match_bg]:-${_fishy_face[search_match]}} memo=fishy")
@@ -855,4 +908,19 @@ fishy-render() {
   if (( _fishy_flash_start >= 0 )); then
     region_highlight+=("$_fishy_flash_start $_fishy_flash_end $_fishy_face[search_match] memo=fishy")
   fi
+}
+
+# Pager spans -> region_highlight, for pager lines from index $1 (1-based;
+# uses `starts` from the caller).
+_fishy_pager_spans_to_rh() {
+  local -i first=$1
+  local sp
+  for sp in "$_fpr_spans[@]"; do
+    local -a sv=(${=sp})
+    local -i ln=$(( sv[1] + 1 ))
+    (( ln < first )) && continue
+    local face=${_fishy_face[$sv[4]]}
+    [[ -z $face || $face == none ]] && continue
+    region_highlight+=("P$(( starts[ln] + sv[2] )) $(( starts[ln] + sv[3] )) $face memo=fishy")
+  done
 }

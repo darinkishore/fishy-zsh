@@ -17,7 +17,7 @@ typeset -ga _fp_idx
 typeset -g  _fp_prefix=''
 typeset -gi _fp_highlight_prefix=0
 typeset -gi _fp_selected=-1 _fp_suggested_row_start=0 _fp_fully_disclosed=0
-typeset -gi _fp_search_shown=0 _fp_search_focused=0
+typeset -gi _fp_search_shown=0
 typeset -g  _fp_search_text='' _fp_extra_progress=''
 typeset -gi _fp_term_w=0 _fp_term_h=0
 # Current rendering (PageRendering).
@@ -32,7 +32,7 @@ fishy-pager-navigating() { (( _fp_selected >= 0 )) }
 fishy-pager-clear() {
   _fp_u_comp=() _fp_u_desc=() _fp_u_raw=() _fp_u_flags=() _fp_u_cw=() _fp_u_dw=() _fp_u_show=()
   _fp_idx=() _fp_prefix='' _fp_highlight_prefix=0 _fp_selected=-1 _fp_fully_disclosed=0
-  _fp_search_shown=0 _fp_search_focused=0 _fp_search_text='' _fp_extra_progress=''
+  _fp_search_shown=0 _fp_search_text='' _fp_extra_progress=''
   _fp_suggested_row_start=0
   _fpr_lines=() _fpr_spans=() _fpr_rows=0 _fpr_cols=0 _fpr_row_start=0 _fpr_row_end=0
   _fpr_remaining=0 _fpr_selected=-1
@@ -200,37 +200,37 @@ _fp_print_item() {
       (( comp_width = comp_width > cw_col - dpw ? comp_width : cw_col - dpw ))
     fi
   fi
-  local prefix_key=$kind:prefix
-  (( _fp_highlight_prefix )) || prefix_key=$kind:comp
+  local prefix_key=${kind}:prefix
+  (( _fp_highlight_prefix )) || prefix_key=${kind}:comp
   local -i comp_remaining=$comp_width k=0
   local -a strs=("${(@ps:\x1e:)_fp_u_comp[i]}")
   local str=""
   for str in "$strs[@]"; do
     if (( k > 0 )); then
-      _fp_print_max "  " $kind:bg $comp_remaining 1; (( comp_remaining -= REPLY ))
+      _fp_print_max "  " ${kind}:bg $comp_remaining 1; (( comp_remaining -= REPLY ))
     fi
     if (( _fp_u_show[i] )); then
       _fp_print_max "$_fp_prefix" $prefix_key $comp_remaining $(( ${#str} > 0 )); (( comp_remaining -= REPLY ))
     fi
-    _fp_print_max "$str" $kind:comp $comp_remaining $(( k + 1 < ${#strs} )); (( comp_remaining -= REPLY ))
+    _fp_print_max "$str" ${kind}:comp $comp_remaining $(( k + 1 < ${#strs} )); (( comp_remaining -= REPLY ))
     (( k++ ))
   done
   local -i desc_remaining=$(( cw_col - comp_width + comp_remaining ))
   if (( _fp_u_dw[i] > 0 && desc_remaining > 4 )); then
-    _fp_print_max "  " $kind:bg $desc_remaining 0; (( desc_remaining -= REPLY ))
+    _fp_print_max "  " ${kind}:bg $desc_remaining 0; (( desc_remaining -= REPLY ))
     local -i a=$(( cw_col > desc_align ? cw_col - desc_align : 0 )) b=$(( _fp_u_dw[i] + 2 ))
     local -i pad=$(( desc_remaining - (a > b ? a : b) ))
     (( pad < 0 )) && pad=0
-    _fp_print_max "${(l:pad:: :)}" $kind:bg $desc_remaining 0; (( desc_remaining -= REPLY ))
+    _fp_print_max "${(l:pad:: :)}" ${kind}:bg $desc_remaining 0; (( desc_remaining -= REPLY ))
     local paren_key=n:paren
     (( selected )) && paren_key=x:paren
     (( secondary && ! selected )) && paren_key=s:paren
     _fp_print_max "(" $paren_key 1 0; (( desc_remaining -= REPLY ))
-    _fp_print_max "$_fp_u_desc[i]" $kind:desc $(( desc_remaining - 1 )) 0; (( desc_remaining -= REPLY ))
+    _fp_print_max "$_fp_u_desc[i]" ${kind}:desc $(( desc_remaining - 1 )) 0; (( desc_remaining -= REPLY ))
     _fp_print_max ")" $paren_key 1 0; (( desc_remaining -= REPLY ))
-    _fp_print_max "${(l:desc_remaining:: :)}" $kind:bg $desc_remaining 0
+    _fp_print_max "${(l:desc_remaining:: :)}" ${kind}:bg $desc_remaining 0
   else
-    _fp_print_max "${(l:desc_remaining:: :)}" $kind:bg $desc_remaining 0
+    _fp_print_max "${(l:desc_remaining:: :)}" ${kind}:bg $desc_remaining 0
   fi
 }
 
@@ -434,3 +434,7 @@ fishy-pager-selected() {
   if (( REPLY < 0 )); then REPLY=-1; return 1; fi
   REPLY=$_fp_idx[REPLY+1]
 }
+
+# fish: active_edit_line_tag() == SearchField, i.e. the search field is shown
+# and the pager is navigating (an index is selected, even if filtered away).
+fishy-search-focused() { (( _fp_search_shown && _fp_selected >= 0 )) }

@@ -143,9 +143,11 @@ def termctrl(*args: str, stdin: bytes | None = None, check: bool = True) -> str:
 # ---------------------------------------------------------------- sandbox
 
 
-def build_home(shell: str) -> Path:
+def build_home(shell: str, tag: str = "shot") -> Path:
     """Fresh $HOME per shell per run, so history/state never leak between shots."""
-    home = SANDBOX / shell / "home"
+    # Same path for both shells (they run one after the other), so anything
+    # that shows $HOME (variable descriptions, cwd) is identical.
+    home = SANDBOX / tag / "home"
     if home.exists():
         shutil.rmtree(home)
     for entry in TREE:
@@ -170,7 +172,9 @@ def build_home(shell: str) -> Path:
         lines.append(f"- cmd: {esc}\n  when: {base + i}\n")
     (data / "fish_history").write_text("".join(lines))
     if shell == "zsh":
-        (home / ".zsh_history").write_text("".join(f"{c}\n" for c in HISTORY))
+        zdata = home / ".local" / "share" / "zsh"
+        zdata.mkdir(parents=True)
+        (zdata / "history").write_text("".join(f"{c}\n" for c in HISTORY))
     return home
 
 
@@ -214,7 +218,7 @@ def shell_env(shell: str, home: Path) -> dict[str, str]:
                 "ZDOTDIR": str(GHOSTTY_SI / "zsh"),
                 "GHOSTTY_ZSH_ZDOTDIR": str(ROOT / "zdotdir"),
                 "NOSYSZSHRC": "1",
-                "HISTFILE": str(home / ".zsh_history"),
+                "HISTFILE": str(home / ".local" / "share" / "zsh" / "history"),
             }
     return env
 
@@ -312,8 +316,15 @@ def parse_json(doc: dict) -> Screen:
     return Screen(rows=rows, cursor=(cur["x"], cur["y"]), cursor_style=cur.get("style", ""), sig=sig)
 
 
+# termctrl 1.2.1 bug: `show NAME` on a live session does not update the cursor
+# when the app only moves it (e.g. "\r\e[7C"); replaying the session's
+# recording through the same Ghostty core is correct. So every capture replays.
+RECORDINGS: dict[str, Path] = {}
+
+
 def capture(name: str) -> Screen:
-    return parse_json(json.loads(termctrl("show", name, "--format", "json")))
+    rec = RECORDINGS[name]
+    return parse_json(json.loads(termctrl("show", "--recording", str(rec), "--format", "json")))
 
 
 def settle(name: str, quiet: float = 0.3, limit: float = 5.0) -> Screen:
@@ -334,15 +345,19 @@ def settle(name: str, quiet: float = 0.3, limit: float = 5.0) -> Screen:
 # ---------------------------------------------------------------- driving
 
 
-def start(shell: str) -> str:
-    name = PREFIX + shell
+def start(shell: str, tag: str = "shot") -> str:
+    name = f"{PREFIX}{tag}-{shell}"
     termctrl("stop", name, check=False)
-    home = build_home(shell)
+    home = build_home(shell, tag)
     env = shell_env(shell, home)
     # Ghostty launches the shell as a login shell via /usr/bin/login (argv0 "-fish").
     argv = [str(DEPS / "bin" / shell), "-l"]
+    rec = SANDBOX / tag / f"{shell}.termctrl"
+    rec.unlink(missing_ok=True)
+    RECORDINGS[name] = rec
     termctrl(
-        "start", name, "--cols", str(COLS), "--rows", str(ROWS), "--cwd", str(home),
+        "start", name, "--record", str(rec), "--cols", str(COLS), "--rows", str(ROWS),
+        "--cwd", str(home),
         "--", "/usr/bin/env", "-i", *(f"{k}={v}" for k, v in env.items()), *argv,
     )
     return name
@@ -375,19 +390,20 @@ def send(name: str, step: str) -> None:
     termctrl("send", name, "--stdin", stdin=data)
 
 
-def run_all(shells: list[str], steps: list[str]) -> dict[str, Screen]:
-    names = {sh: start(sh) for sh in shells}
-    for n in names.values():
-        wait_prompt(n)
+def run_one(shell: str, steps: list[str], tag: str) -> Screen:
+    name = start(shell, tag)
+    wait_prompt(name)
     for step in steps:
-        for n in names.values():
-            send(n, step)
-        for n in names.values():
-            settle(n)
-    screens = {sh: settle(n) for sh, n in names.items()}
-    for n in names.values():
-        termctrl("stop", n, check=False)
-    return screens
+        send(name, step)
+        settle(name)
+    screen = settle(name)
+    termctrl("stop", name, check=False)
+    return screen
+
+
+def run_all(shells: list[str], steps: list[str], tag: str = "shot") -> dict[str, Screen]:
+    # Sequential per scenario: both shells use the same sandbox $HOME path.
+    return {sh: run_one(sh, steps, tag) for sh in shells}
 
 
 # ---------------------------------------------------------------- reporting
@@ -407,11 +423,11 @@ def fmt_segs(segs: list[tuple[int, int, Style]]) -> str:
     return "  ".join(f"[{a}-{b}) {st.label()}" for a, b, st in segs) or "plain"
 
 
-def report(screens: dict[str, Screen]) -> int:
+def report(screens: dict[str, Screen], quiet: bool = False) -> int:
     """Print screens, style maps, and differences. Returns number of differences."""
     names = list(screens)
     height = last_used_row(*screens.values())
-    for name in names:
+    for name in ([] if quiet else names):
         s = screens[name]
         print(f"── {name} (cursor x={s.cursor[0]} y={s.cursor[1]} {s.cursor_style}) " + "─" * 30)
         for y, line in enumerate(s.text()[:height]):
@@ -424,7 +440,8 @@ def report(screens: dict[str, Screen]) -> int:
 
     a, b = (screens[n] for n in names)
     diffs = 0
-    print("── diff " + "─" * 60)
+    if not quiet:
+        print("── diff " + "─" * 60)
     if a.cursor != b.cursor or a.cursor_style != b.cursor_style:
         print(f"cursor: {names[0]}={a.cursor} {a.cursor_style}  {names[1]}={b.cursor} {b.cursor_style}")
         diffs += 1
@@ -441,8 +458,55 @@ def report(screens: dict[str, Screen]) -> int:
             diffs += 1
             print(f"style {y:2}: {names[0]}: {fmt_segs(sa)}")
             print(f"          {names[1]}: {fmt_segs(sb)}")
-    print("IDENTICAL" if diffs == 0 else f"{diffs} difference(s)")
+    if not quiet:
+        print("IDENTICAL" if diffs == 0 else f"{diffs} difference(s)")
     return diffs
+
+
+# ---------------------------------------------------------------- suite
+
+def load_scenarios(path: Path) -> list[tuple[str, list[str]]]:
+    """Lines: NAME <tab> steps (shell-quoted). '#' comments, blank lines ignored."""
+    import shlex
+    out = []
+    for line in path.read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        name, _, rest = line.partition("\t")
+        out.append((name.strip(), shlex.split(rest)))
+    return out
+
+
+def run_suite(path: Path, only: list[str], jobs: int, verbose: bool) -> int:
+    import contextlib
+    import io
+    from concurrent.futures import ThreadPoolExecutor
+
+    scenarios = [sc for sc in load_scenarios(path) if not only or any(o in sc[0] for o in only)]
+
+    def one(sc: tuple[str, list[str]]) -> tuple[str, int, str]:
+        name, steps = sc
+        tag = "".join(c if c.isalnum() else "-" for c in name)
+        try:
+            screens = run_all(list(SHELLS), steps, tag)
+        except Exception as e:  # noqa: BLE001 - report harness failures per scenario
+            return name, -1, f"harness error: {e}"
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            diffs = report(screens, quiet=not verbose)
+        return name, diffs, buf.getvalue()
+
+    with ThreadPoolExecutor(max_workers=jobs) as ex:
+        results = list(ex.map(one, scenarios))
+    failed = 0
+    for name, diffs, out in results:
+        status = "PASS" if diffs == 0 else ("ERROR" if diffs < 0 else f"FAIL({diffs})")
+        print(f"{status:9} {name}")
+        if diffs != 0:
+            failed += 1
+            print("\n".join("          " + l for l in out.rstrip().splitlines()))
+    print(f"\n{len(results) - failed}/{len(results)} identical")
+    return failed
 
 
 def main() -> None:
@@ -451,6 +515,11 @@ def main() -> None:
     shot = sub.add_parser("shot", help="run steps in both shells and diff")
     shot.add_argument("--only", choices=SHELLS)
     shot.add_argument("steps", nargs="*")
+    suite = sub.add_parser("suite", help="run scenario file, compare every scenario")
+    suite.add_argument("--file", default=str(ROOT / "harness" / "scenarios.txt"))
+    suite.add_argument("-j", "--jobs", type=int, default=6)
+    suite.add_argument("-v", "--verbose", action="store_true")
+    suite.add_argument("only", nargs="*")
     args = ap.parse_args()
 
     match args.cmd:
@@ -458,6 +527,8 @@ def main() -> None:
             shells = [args.only] if args.only else list(SHELLS)
             screens = run_all(shells, args.steps)
             sys.exit(1 if report(screens) else 0)
+        case "suite":
+            sys.exit(1 if run_suite(Path(args.file), args.only, args.jobs, args.verbose) else 0)
 
 
 if __name__ == "__main__":

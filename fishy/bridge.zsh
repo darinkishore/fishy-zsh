@@ -139,6 +139,7 @@ fishy-async-send() {
 
 # zle -F widget: consume every complete reply that is available.
 _fishy_w_async_ready() {
+  fishy-unswap
   local fd=$_fishy_rfd[async] rec
   [[ -n $fd ]] || return
   while :; do

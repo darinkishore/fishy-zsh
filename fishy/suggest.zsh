@@ -107,14 +107,14 @@ _fishy_command_line_changed() {
 _fishy_can_autosuggest() {
   (( FISHY_AUTOSUGGEST && ! _fs_suppress )) || return 1
   fishy-hsearch-at-present || return 1
-  (( ! _fp_search_focused )) || return 1
+  fishy-search-focused && return 1
   [[ $BUFFER == *[^$' \t\r\n\v']* ]]
 }
 
 # fish: is_at_line_with_autosuggestion
 fishy-suggest-at-line() {
   [[ -n $_fs_text ]] || return 1
-  (( ! _fp_search_focused )) || return 1
+  fishy-search-focused && return 1
   fishy-line-range "$BUFFER" $CURSOR
   (( REPLY_START == _fs_start && REPLY_END == _fs_end )) && return 0
   (( _fs_start == 0 && CURSOR <= _fs_end ))
@@ -123,13 +123,12 @@ fishy-suggest-at-line() {
 # fish: is_at_autosuggestion (cursor_end_mode is Exclusive in emacs mode)
 fishy-suggest-at-end() {
   [[ -n $_fs_text ]] || return 1
-  (( ! _fp_search_focused )) || return 1
+  fishy-search-focused && return 1
   (( CURSOR == _fs_end ))
 }
 
 # fish: update_autosuggestion
 fishy-suggest-update() {
-  fishy-log "suggest-update buf=[$BUFFER] can=$(_fishy_can_autosuggest && echo 1)"
   if ! _fishy_can_autosuggest; then
     _fs_inflight=''
     fishy-suggest-clear
@@ -150,7 +149,6 @@ _fishy_async_done_suggest() {
 
 # fish: autosuggest_completed
 _fs_completed() {
-  fishy-log "suggest-reply id=$_fs_req_id: ${1//$'\x1f'/|}"
   local rec=$1
   local -a f=("${(@ps:\x1f:)rec}")
   [[ $f[1] == S ]] || return
@@ -164,7 +162,6 @@ _fs_completed() {
   _fishy_can_autosuggest || return
   _fs_prefixes $(( icase >= 0 )) "${BUFFER[start+1,end]}" "$text" || return
   _fs_text=$text _fs_start=$start _fs_end=$end _fs_icase=$icase _fs_whole=$whole
-  fishy-log "suggest-set [$_fs_text] $_fs_start-$_fs_end"
 }
 
 # fish: accept_autosuggestion. Kind: all | line | word STYLE TO_END | count N

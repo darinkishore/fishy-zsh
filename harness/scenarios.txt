@@ -1,0 +1,92 @@
+# name<TAB>steps  (steps: =text, key names, @sleep; see fz.py docstring)
+# Fixture: harness HISTORY + TREE in fz.py. Reference: stock fish 4.9.3.
+
+# --- autosuggestions
+suggest-history	'=git ch'
+suggest-prefix-space	'=git '
+suggest-accept-right	'=git ch' right
+suggest-accept-end	'=git ch' end
+suggest-accept-ctrl-e	'=git ch' ctrl-e
+suggest-accept-ctrl-f	'=git ch' ctrl-f
+suggest-accept-word-optright	'=git ch' opt-right
+suggest-accept-word-twice	'=git ch' opt-right opt-right
+suggest-type-into	'=git ch' =eck
+suggest-mismatch-restore	'=git ch' =z backspace
+suggest-path-gone	'=cat mis'
+suggest-cd-valid	'=cd proj'
+suggest-completion-fallback	'=ls Downlo'
+suggest-cursor-left	'=git ch' left
+suggest-icase	'=GIT CH'
+
+# --- tab completion and pager
+tab-ambiguous	'=git ch' tab
+tab-twice-select	'=git ch' tab tab
+tab-thrice	'=git ch' tab tab tab
+tab-cycle-wrap	'=git ch' tab tab tab tab tab
+tab-shift-tab	'=git ch' tab shift-tab
+tab-escape	'=git ch' tab tab escape
+tab-enter-accept	'=git ch' tab tab enter
+tab-right	'=git ch' tab tab right
+tab-down	'=git ch' tab down
+tab-down-down	'=git ch' tab down down
+tab-up	'=git ch' tab up
+tab-type-after	'=git ch' tab tab =x
+tab-backspace-after	'=git ch' tab tab backspace
+tab-unique-file	'=cat not' tab
+tab-unique-dir	'=cd Docu' tab
+tab-dirs	'=cd ' tab
+tab-icase	'=cd dow' tab
+tab-subdir	'=ls Downloads/' tab
+tab-spaces	'=ls my' tab
+tab-nomatch	'=ls zzz' tab
+tab-glob	'=ls *.txt' tab
+tab-ctrl-s	'=git ch' tab ctrl-s =ry
+tab-shift-tab-first	'=git ch' shift-tab
+tab-escape-unique	'=cat not' tab escape
+tab-hidden	'=ls .' tab
+tab-tilde	'=ls ~/Doc' tab
+tab-var	'=echo $HO' tab
+tab-option	'=git --ver' tab
+tab-mid-token	'=ls Downl' left left tab
+
+# --- history search
+hist-up	up
+hist-up-up	up up
+hist-up-down	up up down
+hist-prefix	=git up
+hist-substring	=check up
+hist-escape	=git up escape
+hist-token	'=cat ' alt-up
+hist-token-dot	'=cat ' alt-.
+
+# --- editing and kills
+kill-ctrl-w	'=ls Documents/report.md' ctrl-w
+kill-ctrl-w-twice	'=ls Documents/report.md' ctrl-w ctrl-w
+kill-alt-bs	'=echo foo-bar_baz' alt-backspace
+kill-ctrl-u	'=echo hello world' left left ctrl-u
+kill-ctrl-k	'=echo hello world' ctrl-a ctrl-k
+kill-yank	'=echo hello world' ctrl-w ctrl-y ctrl-y
+undo-typing	'=echo hello world' ctrl-z
+undo-redo	'=echo hello' ctrl-z alt-/
+ctrl-c-clear	'=echo hello' ctrl-c
+word-left	'=git checkout -b foo' opt-left
+word-left-twice	'=git checkout -b foo' opt-left opt-left
+transpose	=abc ctrl-t
+transpose-words	'=echo one two' alt-t
+capitalize	'=echo hello' ctrl-a alt-c
+
+# --- syntax highlighting
+hl-command	'=echo hello'
+hl-error	=ech
+hl-path	'=ls Documents'
+hl-quotes	"=echo \"dq\" 'sq' \$HOME"
+hl-ops	'=ls | wc -l; echo hi > /tmp/x &'
+hl-comment	'=echo hi # note'
+hl-option	'=ls -la --color'
+
+# --- execute / multi-line
+exec-simple	'=echo hi' enter
+exec-incomplete	'=echo "abc' enter
+exec-incomplete-if	'=if true' enter
+exec-backslash	'=echo a \' enter
+exec-alt-enter	'=echo a' alt-enter

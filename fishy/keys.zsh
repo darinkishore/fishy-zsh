@@ -32,45 +32,88 @@ done
 unset _c
 
 # Function-style bindings (fish functions that call `commandline -f ...`).
-zle -N fishy-up-or-search _fishy_cmd_up-or-search
-zle -N fishy-down-or-search _fishy_cmd_down-or-search
+_fishy_w_up_or_search() { fishy-unswap; _fishy_cmd_up-or-search }
+_fishy_w_down_or_search() { fishy-unswap; _fishy_cmd_down-or-search }
+zle -N fishy-up-or-search _fishy_w_up_or_search
+zle -N fishy-down-or-search _fishy_w_down_or_search
 
-# Self-insert: every printable character goes through fish's Key event path.
-_fishy_w_self_insert() { _fishy_insert "$KEYS" }
-zle -N fishy-self-insert _fishy_w_self_insert
-
-# `self-insert expand-abbr` (space ; | & > < ) ).
-_fishy_w_self_insert_expand() {
-  _fishy_insert "$KEYS"
-  _fishy_run expand-abbr
+# Self-insert, with fish's read_normal_chars batching: while more input is
+# already pending, consecutive self-inserting keys are read ahead and inserted
+# as ONE edit (this decides undo granularity). A key read when nothing more is
+# pending is handled on its own (the Key event path). Keys bound to
+# `self-insert expand-abbr` end the batch and then run expand-abbr.
+typeset -g _fishy_expand_chars=' ;|&><)'
+_fishy_is_self_insert_key() {
+  local k=$1
+  [[ ${#k} == 1 ]] || return 1
+  [[ $k == [[:print:]] || $k == [^[:ascii:]] ]]
 }
-zle -N fishy-self-insert-expand _fishy_w_self_insert_expand
+_fishy_w_self_insert() {
+  fishy-unswap
+  local k=$KEYS acc=''
+  local -i expand_after_acc=0
+  while (( PENDING > 0 )); do
+    acc+=$k
+    if [[ $_fishy_expand_chars == *"$k"* ]]; then
+      expand_after_acc=1 k=''
+      break
+    fi
+    read -k 1 k || { k=''; break }
+    if ! _fishy_is_self_insert_key "$k"; then
+      zle -U -- "$k"
+      k=''
+      break
+    fi
+  done
+  if [[ -n $acc ]]; then
+    _fishy_insert_batch "$acc"
+    (( expand_after_acc )) && _fishy_run expand-abbr
+  fi
+  if [[ -n $k ]]; then
+    _fishy_insert "$k"
+    [[ $_fishy_expand_chars == *"$k"* ]] && _fishy_run expand-abbr
+  fi
+}
+zle -N fishy-self-insert _fishy_w_self_insert
+zle -N fishy-self-insert-expand _fishy_w_self_insert
 
 # ctrl-space: insert a space without expanding (only on a non-empty line).
-_fishy_w_ctrl_space() { [[ -n $BUFFER ]] && _fishy_insert ' ' }
+_fishy_w_ctrl_space() {
+  fishy-unswap
+  [[ -n $BUFFER ]] && _fishy_insert ' '
+}
 zle -N fishy-ctrl-space _fishy_w_ctrl_space
 
 # alt-enter / shift-enter: insert a newline, then expand-abbr.
 _fishy_w_newline() {
+  fishy-unswap
   _fishy_insert $'\n'
   _fishy_run expand-abbr
 }
 zle -N fishy-newline _fishy_w_newline
 
+# ctrl-c arrives as SIGINT while zle is active; fish binds it to
+# clear-commandline (clear the line in place, no ^C, no new prompt).
+_fishy_w_ctrl_c() {
+  fishy-unswap
+  _fishy_run clear-commandline
+}
+zle -N fishy-ctrl-c _fishy_w_ctrl_c
+
 # Enter.
 _fishy_w_execute() {
+  fishy-unswap
   _fishy_accept=0
   _fishy_run execute
   (( _fishy_accept )) || return 0
   fishy-history-add "$BUFFER"
-  POSTDISPLAY=''
-  region_highlight=("${(@)region_highlight:#*memo=fishy}")
   zle .accept-line
 }
 zle -N fishy-execute _fishy_w_execute
 
 # Bracketed paste: fish inserts pasted text as one edit (see paste.zsh).
 _fishy_w_paste() {
+  fishy-unswap
   local text
   zle .bracketed-paste text
   fishy-paste "$text"
