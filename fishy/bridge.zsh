@@ -116,3 +116,50 @@ fishy-call() {
   fishy-send $name "$@" || return 1
   fishy-recv $name $REPLY
 }
+
+# ---------------------------------------------------------------- async server
+# Requests on the async server are tagged with a kind; replies are dispatched to
+# _fishy_async_done_<kind> ID RECORDS... from a zle -F handler.
+
+typeset -gA _fa_kind
+typeset -gi _fa_handler_fd=-1
+
+fishy-async-send() {
+  local kind=$1; shift
+  fishy-send async "$@" || return 1
+  _fa_kind[$REPLY]=$kind
+  local fd=$_fishy_rfd[async]
+  if [[ -n $fd ]] && (( fd != _fa_handler_fd )); then
+    (( _fa_handler_fd >= 0 )) && zle -F $_fa_handler_fd 2>/dev/null
+    zle -F -w $fd fishy-async-ready
+    _fa_handler_fd=$fd
+  fi
+  return 0
+}
+
+# zle -F widget: consume every complete reply that is available.
+_fishy_w_async_ready() {
+  local fd=$_fishy_rfd[async] rec
+  [[ -n $fd ]] || return
+  while :; do
+    local -a records=()
+    local id=''
+    while IFS= read -r -d $'\0' -u $fd rec; do
+      if [[ $rec == $'\x1e'* ]]; then id=${rec#$'\x1e'}; break; fi
+      records+=("$rec")
+    done
+    if [[ -z $id ]]; then
+      # EOF: the server died; forget pending requests, the next one restarts it.
+      zle -F $fd 2>/dev/null; _fa_handler_fd=-1; _fa_kind=()
+      _fishy_stop async
+      _fs_inflight='' _fs_req_id='' _fhl_inflight='' _fhl_req_id=''
+      return
+    fi
+    local kind=${_fa_kind[$id]}
+    unset "_fa_kind[$id]"
+    [[ -n $kind ]] && "_fishy_async_done_$kind" $id "${records[@]}"
+    zselect -t 0 -r $fd 2>/dev/null || break
+  done
+  fishy-render
+  zle -R
+}

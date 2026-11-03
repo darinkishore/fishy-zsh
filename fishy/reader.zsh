@@ -25,6 +25,7 @@ typeset -gi _fishy_flash_start=-1 _fishy_flash_end=-1 _fishy_flash_suggestion=0
 
 fishy-reader-line-init() {
   fishy-editline-reset
+  fishy-highlight-reset
   fishy-suggest-reset
   fishy-pager-clear
   _fishy_last_cmd='' _fishy_completion_action='' _fishy_transient='' _fishy_yank_len=0
@@ -256,6 +257,7 @@ _fishy_run() {
   fi
   _fishy_only_rendering $cmd || _fishy_last_cmd=$cmd
   fishy-suggest-update
+  fishy-highlight-update
 }
 
 # fish: handle_char_event for a Key event (self-insert). $1 = text to insert.
@@ -275,6 +277,7 @@ _fishy_insert() {
   fi
   _fishy_last_cmd=''
   fishy-suggest-update
+  fishy-highlight-update
 }
 
 # ---------------------------------------------------------------- commands
@@ -728,6 +731,7 @@ _fishy_cmd_execute() {
       return ;;
   esac
   fishy-suggest-clear
+  fishy-highlight-finish
   _fishy_accept=1
 }
 
@@ -811,6 +815,10 @@ typeset -g _fishy_sugg_disp=''
 fishy-render() {
   emulate -L zsh -o extendedglob
   region_highlight=("${(@)region_highlight:#*memo=fishy}")
+  # Syntax colors first; suggestion/pager/search-match/flash entries follow and
+  # take precedence where they overlap.
+  fishy-highlight-entries
+  region_highlight+=("$reply[@]")
   fishy-suggest-display
   _fishy_sugg_disp=$REPLY
   local post=$REPLY

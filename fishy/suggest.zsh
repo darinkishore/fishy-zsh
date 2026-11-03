@@ -16,7 +16,6 @@ typeset -g _fs_saved_text=''
 typeset -gi _fs_saved_start=0 _fs_saved_end=0 _fs_saved_icase=-1 _fs_saved_whole=0
 typeset -gi _fs_suppress=0
 typeset -g _fs_inflight='' _fs_req_id=''
-typeset -gi _fs_handler_fd=-1
 
 fishy-suggest-clear() { _fs_text='' _fs_start=0 _fs_end=0 _fs_icase=-1 _fs_whole=0 }
 
@@ -140,43 +139,13 @@ fishy-suggest-update() {
   [[ $BUFFER == "$_fs_inflight" && -n $_fs_req_id ]] && return
   _fs_inflight=$BUFFER
   fishy-suggest-clear
-  fishy-send async suggest $CURSOR "$BUFFER" || { _fs_inflight=''; return }
+  fishy-async-send suggest suggest $CURSOR "$BUFFER" || { _fs_inflight=''; return }
   _fs_req_id=$REPLY
-  _fs_watch
 }
 
-# Watch the async server's reply fd with zle -F (once per fd).
-_fs_watch() {
-  local fd=$_fishy_rfd[async]
-  [[ -n $fd ]] || return
-  (( fd == _fs_handler_fd )) && return
-  (( _fs_handler_fd >= 0 )) && zle -F $_fs_handler_fd 2>/dev/null
-  zle -F -w $fd fishy-suggest-ready
-  _fs_handler_fd=$fd
-}
-
-# zle -F handler: consume every complete reply that is available.
-_fishy_w_suggest_ready() {
-  local fd=$_fishy_rfd[async] rec
-  [[ -n $fd ]] || return
-  while :; do
-    local -a records=()
-    local id=''
-    while IFS= read -r -d $'\0' -u $fd rec; do
-      if [[ $rec == $'\x1e'* ]]; then id=${rec#$'\x1e'}; break; fi
-      records+=("$rec")
-    done
-    if [[ -z $id ]]; then
-      # EOF: server died. Forget the watch; next request restarts it.
-      zle -F $fd 2>/dev/null; _fs_handler_fd=-1; _fishy_stop async
-      _fs_inflight='' _fs_req_id=''
-      return
-    fi
-    [[ $id == "$_fs_req_id" ]] && _fs_completed "${records[@]}"
-    zselect -t 0 -r $fd 2>/dev/null || break
-  done
-  fishy-render
-  zle -R
+_fishy_async_done_suggest() {
+  local id=$1; shift
+  [[ $id == "$_fs_req_id" ]] && _fs_completed "$@"
 }
 
 # fish: autosuggest_completed

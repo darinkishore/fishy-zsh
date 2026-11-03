@@ -20,7 +20,9 @@ fishy-editline-reset() {
 # Replace [start,end) of BUFFER with rep (no bookkeeping).
 _fe_apply() {
   local -i start=$1 end=$2
+  _fhl_check
   BUFFER="${BUFFER[1,start]}${3}${BUFFER[end+1,-1]}"
+  _fhl_splice $start $end ${#3}
 }
 
 # fish: cursor_position_after_edit
