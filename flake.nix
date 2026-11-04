@@ -13,6 +13,7 @@
   };
 
   outputs = {
+    self,
     nixpkgs,
     zsh-src,
     ...
@@ -20,6 +21,12 @@
     systems = ["aarch64-darwin" "x86_64-linux" "aarch64-linux"];
     forAll = f: nixpkgs.lib.genAttrs systems (s: f nixpkgs.legacyPackages.${s});
   in {
+    apps = forAll (pkgs: {
+      try = {
+        type = "app";
+        program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.try}/bin/fishy-try";
+      };
+    });
     packages = forAll (pkgs: let
       inherit (pkgs) lib stdenv;
       # nixpkgs marks yodl Linux-only, but it builds on Darwin once its
@@ -55,6 +62,19 @@
         preAutoreconf = "./Util/preconfig";
         postInstall = builtins.replaceStrings ["zsh-5.9.2"] ["zsh-${zshVersion}"] old.postInstall;
       });
+
+      # `nix run .#try`: fishy zsh in the current terminal with your real zsh
+      # config, from this checkout (edits to fishy/*.zsh apply on next launch).
+      try = pkgs.writeShellScriptBin "fishy-try" ''
+        root=''${FISHY_ROOT:-$PWD}
+        if [ ! -f "$root/fishy/fishy.zsh" ]; then
+          echo "fishy-try: run from the fishy-zsh checkout (or set FISHY_ROOT)" >&2
+          exit 1
+        fi
+        export FISHY_ROOT=$root FISHY_FISH=${fishy-fish}/bin/fish
+        export ZDOTDIR=$root/try
+        exec ${fishy-zsh}/bin/zsh -i "$@"
+      '';
 
       # Everything the dev zdotdir and the harness need, at stable paths under
       # ./deps (made by `nix build .#deps -o deps`). No sudo, no activation.

@@ -23,6 +23,18 @@ source $FISHY_DIR/keys.zsh
 source $FISHY_DIR/paste.zsh
 source $FISHY_DIR/integrations.zsh
 
+# fishy owns POSTDISPLAY, region_highlight and every widget. Detach the usual
+# plugins that would fight over them if they were loaded before us.
+autoload -Uz add-zsh-hook add-zle-hook-widget
+if (( $+functions[_zsh_autosuggest_start] )); then
+  add-zsh-hook -d precmd _zsh_autosuggest_start
+  add-zsh-hook -d precmd _zsh_autosuggest_bind_widgets 2>/dev/null
+fi
+if (( $+functions[_zsh_highlight__zle-line-pre-redraw] )); then
+  add-zle-hook-widget -d line-pre-redraw _zsh_highlight__zle-line-pre-redraw
+  add-zle-hook-widget -d line-finish _zsh_highlight__zle-line-finish
+fi
+
 # Cursor shape: under nix-darwin, Ghostty's fish integration never loads (fish
 # builds its vendor_conf.d list from the Nix profiles, not XDG_DATA_DIRS), so
 # fish keeps the terminal's default block cursor. Ghostty's zsh integration
