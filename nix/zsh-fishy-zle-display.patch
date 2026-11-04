@@ -1,0 +1,336 @@
+diff --git a/Src/Zle/zle_main.c b/Src/Zle/zle_main.c
+index 772d16947..3f13fa456 100644
+--- a/Src/Zle/zle_main.c
++++ b/Src/Zle/zle_main.c
+@@ -1279,6 +1279,7 @@ zleread(char **lp, char **rp, int flags, int context, char *init, char *finish)
+     rpmpt_attr = txtcurrentattrs;
+     prompt_attr = mixattrs(pmpt_attr, pmpt_attr & TXT_ATTR_ALL, rpmpt_attr);
+     free_prepostdisplay();
++    free_zle_display();
+ 
+     zlereadflags = flags;
+     zlecontext = context;
+diff --git a/Src/Zle/zle_params.c b/Src/Zle/zle_params.c
+index bf1e90470..c7a1bba0b 100644
+--- a/Src/Zle/zle_params.c
++++ b/Src/Zle/zle_params.c
+@@ -133,6 +133,8 @@ static const struct gsu_hash registers_gsu =
+ /* implementation is in zle_refresh.c */
+ static const struct gsu_array region_highlight_gsu =
+ { get_region_highlight, set_region_highlight, unset_region_highlight };
++static const struct gsu_array zle_display_gsu =
++{ get_zle_display, set_zle_display, unset_zle_display };
+ 
+ #define GSU(X) ( (GsuScalar)(void*)(&(X)) )
+ static struct zleparam {
+@@ -170,6 +172,7 @@ static struct zleparam {
+     { "RBUFFER", PM_SCALAR,  GSU(rbuffer_gsu), NULL },
+     { "REGION_ACTIVE", PM_INTEGER, GSU(region_active_gsu), NULL},
+     { "region_highlight", PM_ARRAY, GSU(region_highlight_gsu), NULL },
++    { "zle_display", PM_ARRAY, GSU(zle_display_gsu), NULL },
+     { "UNDO_CHANGE_NO", PM_INTEGER | PM_READONLY, GSU(undo_change_no_gsu),
+       NULL },
+     { "UNDO_LIMIT_NO", PM_INTEGER, GSU(undo_limit_no_gsu), NULL },
+diff --git a/Src/Zle/zle_refresh.c b/Src/Zle/zle_refresh.c
+index d58645a8b..bd48eb6d3 100644
+--- a/Src/Zle/zle_refresh.c
++++ b/Src/Zle/zle_refresh.c
+@@ -201,6 +201,9 @@ ZLE_STRING_T predisplay, postdisplay;
+ /**/
+ int predisplaylen, postdisplaylen;
+ 
++/* zle_display: map from display-line position to logical position */
++static int *tmplogpos, tmplogll;
++
+ 
+ /*
+  * Attributes used by default on the command line,
+@@ -597,6 +600,218 @@ unset_region_highlight(Param pm, int exp)
+     }
+ }
+ 
++/*
++ * zle_display: display-only edits of the edit buffer.
++ *
++ * Each element is "START END TEXT": TEXT is drawn in place of the buffer
++ * characters [START,END), or inserted before buffer offset START when
++ * START == END.  The buffer, $CURSOR and region_highlight offsets are not
++ * affected.  Inserted characters are drawn with the base attributes;
++ * replacement characters with those of the buffer character they replace.
++ * The cursor at START of an insertion is drawn after the inserted text.
++ * Elements overlapping an earlier one are ignored; edits reaching beyond
++ * the end of the buffer are not applied.  The array is cleared whenever a
++ * new line is read, like PREDISPLAY and POSTDISPLAY.
++ */
++struct zle_display_edit {
++    int start, end;		/* buffer offsets, half open */
++    ZLE_STRING_T text;		/* text to draw */
++    int len, sz;		/* its length and allocated size */
++    char *spec;			/* the original element, for reading back */
++};
++static struct zle_display_edit *zle_display_edits;
++static int n_zle_display_edits, alloc_zle_display_edits;
++
++static void
++free_zle_display_edit(struct zle_display_edit *d)
++{
++    if (d->text)
++	zfree(d->text, d->sz * sizeof(ZLE_CHAR_T));
++    zsfree(d->spec);
++    d->text = NULL;
++    d->spec = NULL;
++}
++
++/**/
++void
++free_zle_display(void)
++{
++    int i;
++    for (i = 0; i < n_zle_display_edits; i++)
++	free_zle_display_edit(zle_display_edits + i);
++    if (zle_display_edits)
++	zfree(zle_display_edits,
++	      alloc_zle_display_edits * sizeof(struct zle_display_edit));
++    zle_display_edits = NULL;
++    n_zle_display_edits = alloc_zle_display_edits = 0;
++}
++
++/**/
++char **
++get_zle_display(UNUSED(Param pm))
++{
++    char **retarr = (char **)zhalloc((n_zle_display_edits + 1) * sizeof(char *));
++    int i;
++    for (i = 0; i < n_zle_display_edits; i++)
++	retarr[i] = dupstring(zle_display_edits[i].spec);
++    retarr[i] = NULL;
++    return retarr;
++}
++
++static int
++zle_display_cmp(const void *a, const void *b)
++{
++    const struct zle_display_edit *x = a, *y = b;
++    if (x->start != y->start)
++	return x->start < y->start ? -1 : 1;
++    /* An insertion at START comes before a replacement starting there. */
++    return (x->end - x->start) - (y->end - y->start);
++}
++
++/**/
++void
++set_zle_display(UNUSED(Param pm), char **aval)
++{
++    int n, i, kept;
++    char **av;
++
++    free_zle_display();
++    if (!aval)
++	return;
++    n = arrlen(aval);
++    if (!n) {
++	freearray(aval);
++	return;
++    }
++    zle_display_edits = (struct zle_display_edit *)
++	zshcalloc(n * sizeof(struct zle_display_edit));
++    alloc_zle_display_edits = n;
++    for (av = aval; *av; av++) {
++	char *str = *av, *endp;
++	struct zle_display_edit *d;
++	zlong start, end;
++
++	start = zstrtol(str, &endp, 10);
++	if (endp == str || *endp != ' ')
++	    continue;
++	str = endp + 1;
++	end = zstrtol(str, &endp, 10);
++	if (endp == str || (*endp && *endp != ' '))
++	    continue;
++	if (*endp == ' ')
++	    endp++;
++	if (start < 0 || end < start)
++	    continue;
++	d = zle_display_edits + n_zle_display_edits++;
++	d->start = (int)start;
++	d->end = (int)end;
++	d->text = stringaszleline(endp, 0, &d->len, &d->sz, NULL);
++	d->spec = ztrdup(*av);
++    }
++    freearray(aval);
++    if (n_zle_display_edits < 2)
++	return;
++    qsort(zle_display_edits, n_zle_display_edits,
++	  sizeof(struct zle_display_edit), zle_display_cmp);
++    /* Drop edits that overlap an earlier one. */
++    for (i = 1, kept = 1; i < n_zle_display_edits; i++) {
++	struct zle_display_edit *prev = zle_display_edits + kept - 1;
++	struct zle_display_edit *cur = zle_display_edits + i;
++	int prev_insert = prev->start == prev->end;
++	int cur_insert = cur->start == cur->end;
++	int ok;
++	if (cur->start == prev->start)
++	    /* only "insertion, then replacement" may share a START */
++	    ok = prev_insert && !cur_insert;
++	else
++	    ok = cur->start >= prev->end;
++	if (!ok) {
++	    free_zle_display_edit(cur);
++	    continue;
++	}
++	if (kept != i) {
++	    zle_display_edits[kept] = *cur;
++	    cur->text = NULL;
++	    cur->spec = NULL;
++	}
++	kept++;
++    }
++    n_zle_display_edits = kept;
++}
++
++/**/
++void
++unset_zle_display(Param pm, int exp)
++{
++    if (exp) {
++	set_zle_display(pm, NULL);
++	stdunsetfn(pm, exp);
++    }
++}
++
++/*
++ * Apply zle_display edits to LINE (PREDISPLAY + buffer + POSTDISPLAY, LL
++ * characters, cursor at CS).  Returns a newly allocated line, or NULL if no
++ * edit applies.  *OUTLOG maps each output character to its position in LINE
++ * (-1 for inserted characters), which is used for highlighting.
++ */
++static ZLE_STRING_T
++apply_zle_display(ZLE_STRING_T line, int ll, int cs,
++		  int *outll, int *outcs, int **outlog)
++{
++    ZLE_STRING_T out;
++    int *log, total = ll, used = 0, i, o, p, e, newcs = -1;
++
++    for (i = 0; i < n_zle_display_edits; i++) {
++	struct zle_display_edit *d = zle_display_edits + i;
++	if (d->end > zlell)
++	    break;		/* sorted by START, and END >= START */
++	total += d->len - (d->end - d->start);
++	used++;
++    }
++    if (!used)
++	return NULL;
++    out = (ZLE_STRING_T)zalloc((total ? total : 1) * sizeof(*out));
++    log = (int *)zalloc((total ? total : 1) * sizeof(int));
++    for (o = 0, p = 0, e = 0; p <= ll; ) {
++	int replaced = 0;
++	while (e < used && p == predisplaylen + zle_display_edits[e].start) {
++	    struct zle_display_edit *d = zle_display_edits + e++;
++	    int rlen = d->end - d->start, k;
++	    for (k = 0; k < d->len; k++) {
++		if (rlen && newcs < 0 && cs == p + k)
++		    newcs = o;
++		out[o] = d->text[k];
++		log[o] = rlen ? p + (k < rlen ? k : rlen - 1) : -1;
++		o++;
++	    }
++	    if (rlen) {
++		if (newcs < 0 && cs >= p && cs < p + rlen)
++		    newcs = o;	/* cursor beyond shorter replacement text */
++		p += rlen;
++		replaced = 1;
++		break;
++	    }
++	}
++	if (replaced)
++	    continue;
++	if (newcs < 0 && cs == p)
++	    newcs = o;
++	if (p == ll)
++	    break;
++	out[o] = line[p];
++	log[o] = p;
++	o++;
++	p++;
++    }
++    DPUTS(o != total, "BUG: zle_display length mismatch");
++    *outll = o;
++    *outcs = newcs < 0 ? o : newcs;
++    *outlog = log;
++    return out;
++}
++
++
+ 
+ /*
+  * Output a termcap capability, clearing any text attributes so
+@@ -1024,12 +1239,29 @@ zrefresh(void)
+ 	tmpcs = zlecs + predisplaylen;
+ 	tmpll = predisplaylen + zlell + postdisplaylen;
+ 	tmpalloced = 1;
+-    } else {
++        } else {
+ 	tmpline = zleline;
+ 	tmpcs = zlecs;
+ 	tmpll = zlell;
+ 	tmpalloced = 0;
+     }
++    tmplogpos = NULL;
++    tmplogll = 0;
++    if (n_zle_display_edits) {
++	int dll, dcs, *dlog;
++	ZLE_STRING_T dline = apply_zle_display(tmpline, tmpll, tmpcs,
++					       &dll, &dcs, &dlog);
++	if (dline) {
++	    if (tmpalloced)
++		zfree(tmpline, tmpll * sizeof(*tmpline));
++	    tmpline = dline;
++	    tmpll = dll;
++	    tmpcs = dcs;
++	    tmpalloced = 1;
++	    tmplogpos = dlog;
++	    tmplogll = dll;
++	}
++    }
+ 
+     zle_set_cursorform();
+ 
+@@ -1226,8 +1458,9 @@ zrefresh(void)
+ 			offset = 0;	/* include predisplay in start end */
+ 		    else
+ 			offset = predisplaylen; /* increment over it */
+-		    if (rhp->start + offset <= tmppos &&
+-			tmppos < rhp->end + offset) {
++		    int lpos = tmplogpos ? tmplogpos[tmppos] : tmppos;
++		    if (lpos >= 0 && rhp->start + offset <= lpos &&
++			lpos < rhp->end + offset) {
+ 			base_attr = mixattrs(rhp->atr, rhp->atrmask, base_attr);
+ 			if (layer > special_layer)
+ 			    all_attr = mixattrs(rhp->atr, rhp->atrmask,
+@@ -1753,8 +1986,13 @@ individually */
+ singlelineout:
+     fflush(shout);		/* make sure everything is written out */
+ 
+-    if (tmpalloced)
++        if (tmpalloced)
+ 	zfree(tmpline, tmpll * sizeof(*tmpline));
++    if (tmplogpos) {
++	zfree(tmplogpos, (tmplogll ? tmplogll : 1) * sizeof(int));
++	tmplogpos = NULL;
++	tmplogll = 0;
++    }
+ 
+     zle_free_highlight();
+ 
+@@ -2524,8 +2762,9 @@ singlerefresh(ZLE_STRING_T tmpline, int tmpll, int tmpcs)
+ 		offset = 0;	/* include predisplay in start end */
+ 	    else
+ 		offset = predisplaylen; /* increment over it */
+-	    if (rhp->start + offset <= t0 &&
+-		t0 < rhp->end + offset) {
++	    int lpos = tmplogpos ? tmplogpos[t0] : t0;
++	    if (lpos >= 0 && rhp->start + offset <= lpos &&
++		lpos < rhp->end + offset) {
+ 		if (base_attr & (TXTFGCOLOUR|TXTBGCOLOUR)) {
+ 		    /* keep colour already set */
+ 		    base_attr |= rhp->atr & ~TXT_ATTR_COLOUR_MASK;

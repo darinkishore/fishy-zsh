@@ -193,6 +193,8 @@ def shell_env(shell: str, home: Path) -> dict[str, str]:
         # Patched fish for zsh's server: the nix build, or a dev cargo build.
         "FISHY_FISH": os.environ.get("FISHY_DEV_FISH", str(DEPS / "bin" / "fishy-fish")),
         "FISHY_LOG": os.environ.get("FISHY_LOG", ""),
+        # The reference is stock fish: compare against fish's own bindings.
+        "FISHY_INTEGRATIONS": "0",
         # Ghostty-provided
         "TERM": "xterm-ghostty",
         "TERMINFO": str(GHOSTTY / "Resources" / "terminfo"),

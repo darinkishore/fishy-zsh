@@ -845,6 +845,53 @@ fishy-unswap() {
   _fcl_swapped=0
 }
 
+# Display-only edits (patched zle's `zle_display`): fish's continuation-line
+# indent, and the suggestion-case display of combine_command_and_autosuggestion.
+typeset -gi _fishy_has_zle_display=-1
+_fishy_prompt_width() {
+  local p=${(%)PS1}
+  p=${p//$'\e'\[[0-9;:?]#[a-zA-Z]/}
+  p=${p//$'\e'\][^$'\a']#$'\a'/}
+  p=${p##*$'\n'}
+  local -i w=${(m)#p}
+  (( w >= ${COLUMNS:-80} )) && w=0      # prompt fills the line: no indent
+  REPLY=$w
+}
+_fishy_display_edits() {
+  reply=()
+  if (( _fishy_has_zle_display < 0 )); then
+    [[ ${(t)zle_display} == *special* ]] && _fishy_has_zle_display=1 || _fishy_has_zle_display=0
+  fi
+  (( _fishy_has_zle_display )) || return
+  local -a edits=()
+  # Case flip: an icase suggestion whose case differs from the typed line is
+  # drawn in the suggestion's case unless the last token has uppercase.
+  if [[ -n $_fishy_sugg_disp ]]; then
+    local -i ss=$_fs_start se=$_fs_end
+    local line=${BUFFER[ss+1,se]}
+    if [[ $_fs_text != "$line"* ]] && (( ${#line} < ${#_fs_text} )); then
+      fishy-call sync token-extent $(( ${#BUFFER} > 0 ? ${#BUFFER} - 1 : 0 )) "$BUFFER"
+      local -a e=("${(@ps:\x1f:)fishy_reply[1]}")
+      local lasttok=${BUFFER[e[2]+1,e[3]]}
+      if [[ $lasttok != *[[:upper:]]* ]]; then
+        edits+=("$ss $se ${_fs_text[1,se-ss]}")
+      fi
+    fi
+  fi
+  # Continuation-line indent.
+  if [[ $BUFFER == *$'\n'* ]]; then
+    _fishy_prompt_width; local -i pw=$REPLY
+    fishy-indents "$BUFFER"
+    local r
+    for r in "$reply[@]"; do
+      local -a f=(${=r})
+      local -i cols=$(( pw + 4 * f[2] ))
+      (( cols > 0 )) && edits+=("$f[1] $f[1] ${(l:cols:: :)}")
+    done
+  fi
+  reply=("$edits[@]")
+}
+
 # zle-line-pre-redraw: compose POSTDISPLAY and region_highlight.
 fishy-render() {
   emulate -L zsh -o extendedglob
@@ -869,6 +916,8 @@ fishy-render() {
     _fishy_render_pager
     plines=("$_fpr_lines[@]")
   fi
+  _fishy_display_edits
+  (( _fishy_has_zle_display )) && zle_display=("$reply[@]")
   if (( ${#plines} )) && fishy-search-focused; then
     # Swapped layout: PREDISPLAY = command line + "\nsearch: ", BUFFER = field.
     local cl=$BUFFER field=$_fp_search_text
@@ -878,6 +927,7 @@ fishy-render() {
     local pad=${(l:fieldw-${#field}:: :)}
     PREDISPLAY=$pre
     BUFFER=$field CURSOR=${#field}
+    (( _fishy_has_zle_display )) && zle_display=()
     # Command-line syntax colors move into the PREDISPLAY region.
     local e
     for e in "$syntax[@]"; do region_highlight+=("P$e"); done

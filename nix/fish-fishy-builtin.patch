@@ -30,10 +30,10 @@ index 87803da12..0115d126c 100644
      use super::{combine_command_and_autosuggestion, completion_apply_to_command_line};
 diff --git a/src/reader/reader/fishy.rs b/src/reader/reader/fishy.rs
 new file mode 100644
-index 000000000..acccea89c
+index 000000000..e4313b778
 --- /dev/null
 +++ b/src/reader/reader/fishy.rs
-@@ -0,0 +1,1125 @@
+@@ -0,0 +1,1170 @@
 +//! `__fishy`: headless access to the reader's completion, autosuggestion, word
 +//! motion and history logic, so another line editor (zsh, via fishy-zsh) can
 +//! reproduce fish's interactive behavior exactly instead of approximating it.
@@ -74,6 +74,10 @@ index 000000000..acccea89c
 +//!       H start end zsh_spec   for each run of identically-colored characters
 +//!   __fishy define-commands NAME...          stub functions so zsh-only commands
 +//!                                            (aliases, functions, builtins) are valid
++//!   __fishy complete-tokens ZOPTS LINE        (builtin `complete -C --escape`,
++//!       K token description                   with zsh escaping of each token)
++//!   __fishy escape ZOPTS STRING...          (`string escape -n`, zsh rules)
++//!       Q escaped   per string
 +//!   __fishy face (FG_ROLE BG_ROLE VALID_PATH FORCE_UNDERLINE)...
 +//!       F zsh_highlight_spec per group (resolved exactly like the reader's colors)
 +
@@ -744,6 +748,47 @@ index 000000000..acccea89c
 +                cmd.push_utfstr(&escape(name));
 +                cmd.push_str("; end");
 +                let _ = parser.eval(&cmd, &crate::io::IoChain::new());
++            }
++        }
++        Some("complete-tokens") => {
++            // Mirrors the `complete -C` builtin: apply each completion to the
++            // current token as a fake command line, drop the trailing space.
++            let (Some(z), Some(line)) = (arg(2).map(ZshOpts::parse), arg(3)) else {
++                return bad;
++            };
++            let (token, _) = get_token_extent(line, line.len());
++            let options = CompletionRequestOptions::default();
++            let (mut comp, _) = complete(line, options, &mut parser.context());
++            sort_and_prioritize(&mut comp, options);
++            for next in comp {
++                let faux = &line[token.clone()];
++                let mut tmp_cursor = faux.len();
++                let mut with = zsh_apply(
++                    &mut OperationContext::background_interruptible(parser.vars()),
++                    &next.completion,
++                    next.flags,
++                    faux,
++                    &mut tmp_cursor,
++                    false,
++                    false,
++                    z,
++                );
++                if next.flags.suffix_type().is_some() && with.as_char_slice().last() == Some(&' ') {
++                    with.truncate(with.len() - 1);
++                }
++                record(streams, &[L!("K"), &with, &next.description]);
++            }
++        }
++        Some("escape") => {
++            let Some(z) = arg(2).map(ZshOpts::parse) else {
++                return bad;
++            };
++            let flags = EscapeFlags {
++                no_quoted: true,
++                ..Default::default()
++            };
++            for item in &args[3..] {
++                record(streams, &[L!("Q"), &zsh_escape_script(item, flags, z)]);
 +            }
 +        }
 +        Some("face") => {

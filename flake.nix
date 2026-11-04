@@ -46,6 +46,9 @@
         pname = "fishy-zsh";
         version = zshVersion;
         src = zsh-src;
+        # zle_display: display-only insertions/replacements (continuation indent,
+        # case-flipped suggestion display). Not upstream.
+        patches = (old.patches or []) ++ [./nix/zsh-fishy-zle-display.patch];
         # yodl renders the docs; col (util-linux) is needed for run-help files.
         nativeBuildInputs = old.nativeBuildInputs ++ [yodl pkgs.unixtools.col];
         # A git checkout has no generated configure / docs; zsh's own bootstrap.

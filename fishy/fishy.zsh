@@ -13,6 +13,7 @@ autoload -Uz add-zle-hook-widget
 source $FISHY_DIR/bridge.zsh
 source $FISHY_DIR/editline.zsh
 source $FISHY_DIR/highlight.zsh
+source $FISHY_DIR/indent.zsh
 source $FISHY_DIR/suggest.zsh
 source $FISHY_DIR/pager.zsh
 source $FISHY_DIR/complete.zsh
@@ -20,6 +21,7 @@ source $FISHY_DIR/theme.zsh
 source $FISHY_DIR/reader.zsh
 source $FISHY_DIR/keys.zsh
 source $FISHY_DIR/paste.zsh
+source $FISHY_DIR/integrations.zsh
 
 # Cursor shape: under nix-darwin, Ghostty's fish integration never loads (fish
 # builds its vendor_conf.d list from the Nix profiles, not XDG_DATA_DIRS), so
@@ -86,6 +88,9 @@ autoload -Uz add-zsh-hook
 add-zsh-hook precmd _fishy_precmd
 
 fishy-keys-install
+# darin's fish layers atuin and fzf on top of the defaults; so does fishy
+# (FISHY_INTEGRATIONS=0 keeps stock fish bindings, e.g. for the harness).
+[[ ${FISHY_INTEGRATIONS:-1} == 1 ]] && fishy-integrations-install
 
 # ctrl-c while editing: fish binds it to clear-commandline (clear in place, no
 # ^C, no new prompt). zsh delivers it as SIGINT, and a widget run from inside
