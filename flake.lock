@@ -18,7 +18,25 @@
     },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "zsh-src": "zsh-src"
+      }
+    },
+    "zsh-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793569042,
+        "narHash": "sha256-uce+7FdDnVWUeIdS74ogZrQfCk6G/ve6VgTdgMKmXBY=",
+        "owner": "zsh-users",
+        "repo": "zsh",
+        "rev": "30e8be913521523d226789e53a4a2202dabff61c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "zsh-users",
+        "repo": "zsh",
+        "rev": "30e8be913521523d226789e53a4a2202dabff61c",
+        "type": "github"
       }
     }
   },
