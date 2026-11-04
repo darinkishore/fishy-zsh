@@ -25,17 +25,19 @@ fishy-log() { [[ -n $FISHY_LOG ]] && print -r -- "$EPOCHREALTIME $*" >>$FISHY_LO
 
 _fishy_start() {
   emulate -L zsh
-  local name=$1 dir wfd rfd
-  dir=$(command mktemp -d "${TMPDIR:-/tmp}/fishy.XXXXXX") || return 1
-  command mkfifo -m 600 $dir/req $dir/resp || { command rm -rf $dir; return 1 }
-  # The child opens req (read) then resp (write); we open in the same order,
-  # so neither side can deadlock on the other's open().
+  local name=$1 wfd rfd
+  # A detached coproc gives us a pipe pair without forking helpers (mktemp,
+  # mkfifo, rm). Its fds are duplicated and the job disowned, so the next
+  # coproc can start and nothing shows up in `jobs`.
   # Force fish's default theme (normally interactive-only, share/config.fish)
-  # so the server can resolve colors exactly like interactive fish.
-  __fish_force_load_default_theme=1 $FISHY_FISH -c "source ${(q)FISHY_DIR}/server.fish" <$dir/req >$dir/resp 2>/dev/null &!
+  # so the server resolves colors exactly like interactive fish.
+  # No job control here: no "[n] pid" notice and no job table entry. The
+  # server then shares zsh's process group, so it ignores terminal-generated
+  # signals itself (`__fishy serve-init` in server.fish).
+  setopt local_options no_monitor no_notify
+  coproc __fish_force_load_default_theme=1 $FISHY_FISH -c "source ${(q)FISHY_DIR}/server.fish" 2>/dev/null
   _fishy_pid[$name]="$!"
-  exec {wfd}>$dir/req {rfd}<$dir/resp
-  command rm -rf $dir
+  exec {wfd}>&p {rfd}<&p
   _fishy_wfd[$name]=$wfd _fishy_rfd[$name]=$rfd _fishy_envsig[$name]=''
 }
 
@@ -80,8 +82,10 @@ _fishy_sync_env() {
   kv=(${(o)kv})
   local sig=${(pj:\x1f:)kv}
   [[ $sig == "$_fishy_envsig[$name]" ]] && return 0
+  # Fire-and-forget: requests are processed in order, and the reply is
+  # discarded by the next fishy-recv (or the async handler) by its id.
+  _fishy_ensure $name || return 1
   _fishy_write $name env "${kv[@]}" || return 1
-  fishy-recv $name $REPLY || return 1
   _fishy_envsig[$name]=$sig
 }
 
@@ -105,9 +109,15 @@ fishy-send() {
   emulate -L zsh
   local name=$1; shift
   _fishy_ensure $name || return 1
-  _fishy_sync_env $name || return 1
   _fishy_write $name "$@"
   fishy-log "send[$name] id=$REPLY $1"
+}
+
+# Send without waiting for the reply (ordering still holds per server).
+fishy-tell() {
+  emulate -L zsh
+  local name=$1; shift
+  fishy-send $name "$@"
 }
 
 fishy-call() {

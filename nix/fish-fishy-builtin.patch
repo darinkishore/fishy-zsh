@@ -30,10 +30,10 @@ index 87803da12..0115d126c 100644
      use super::{combine_command_and_autosuggestion, completion_apply_to_command_line};
 diff --git a/src/reader/reader/fishy.rs b/src/reader/reader/fishy.rs
 new file mode 100644
-index 000000000..e4313b778
+index 000000000..590157d60
 --- /dev/null
 +++ b/src/reader/reader/fishy.rs
-@@ -0,0 +1,1170 @@
+@@ -0,0 +1,1182 @@
 +//! `__fishy`: headless access to the reader's completion, autosuggestion, word
 +//! motion and history logic, so another line editor (zsh, via fishy-zsh) can
 +//! reproduce fish's interactive behavior exactly instead of approximating it.
@@ -78,6 +78,8 @@ index 000000000..e4313b778
 +//!       K token description                   with zsh escaping of each token)
 +//!   __fishy escape ZOPTS STRING...          (`string escape -n`, zsh rules)
 +//!       Q escaped   per string
++//!   __fishy serve-init                       ignore terminal-generated signals: the
++//!                                            server shares the shell's process group
 +//!   __fishy face (FG_ROLE BG_ROLE VALID_PATH FORCE_UNDERLINE)...
 +//!       F zsh_highlight_spec per group (resolved exactly like the reader's colors)
 +
@@ -789,6 +791,16 @@ index 000000000..e4313b778
 +            };
 +            for item in &args[3..] {
 +                record(streams, &[L!("Q"), &zsh_escape_script(item, flags, z)]);
++            }
++        }
++        Some("serve-init") => {
++            // The server runs in zsh's process group while zle is reading, so the
++            // terminal's ^C / ^\ / ^Z would reach it; it must never react.
++            for sig in [libc::SIGINT, libc::SIGQUIT, libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
++                // SAFETY: setting a signal disposition to SIG_IGN is always sound.
++                unsafe {
++                    libc::signal(sig, libc::SIG_IGN);
++                }
 +            }
 +        }
 +        Some("face") => {

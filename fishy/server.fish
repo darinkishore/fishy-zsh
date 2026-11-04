@@ -42,4 +42,5 @@ function __fishy_set_env
     end
 end
 
+builtin __fishy serve-init
 __fishy_serve

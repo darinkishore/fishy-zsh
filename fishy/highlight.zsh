@@ -49,7 +49,8 @@ _fhl_apply_records() {
   for rec in "$@"; do
     local -a f=("${(@ps:\x1f:)rec}")
     [[ $f[1] == H ]] || continue
-    for (( i = f[2] + 1; i <= f[3]; i++ )); do _fhl_colors[i]=$f[4]; done
+    _fishy_face_sanitize "$f[4]"
+    for (( i = f[2] + 1; i <= f[3]; i++ )); do _fhl_colors[i]=$REPLY; done
   done
 }
 

@@ -65,8 +65,8 @@ _fishy_sync_commands() {
   local -a names=(${(k)aliases} ${(k)functions} ${(k)builtins} ${(k)reswords})
   local sig=${(j: :)${(o)names}}
   [[ $sig == "$_fishy_cmds_sig" ]] && return
-  fishy-call sync define-commands "${names[@]}"
-  fishy-call async define-commands "${names[@]}"
+  fishy-tell sync define-commands "${names[@]}"
+  fishy-tell async define-commands "${names[@]}"
   _fishy_cmds_sig=$sig
 }
 
@@ -74,13 +74,13 @@ _fishy_precmd() {
   _fishy_sync_commands
   # Make the last command searchable/suggestible and saved (fish: resolve_pending
   # after the command finishes), and pick up exported-environment changes.
-  fishy-call sync history-resolve
+  fishy-tell sync history-resolve
   _fishy_sync_env sync
   _fishy_sync_env async
 }
 
 _fishy_line_init() {
-  (( ${#_fishy_face} )) || fishy-theme-load
+  (( ${#_fishy_face} )) || fishy-theme-collect
   fishy-reader-line-init
 }
 
@@ -106,30 +106,14 @@ fishy-keys-install
 
 # ctrl-c while editing: fish binds it to clear-commandline (clear in place, no
 # ^C, no new prompt). zsh delivers it as SIGINT, and a widget run from inside
-# the trap is cut short by the pending interrupt. So the trap only writes a
-# byte to a self-pipe watched with `zle -F`; zle's input wait wakes up and runs
-# the handler widget in a normal context.
-typeset -gi _fishy_intr_fd=-1
-_fishy_intr_setup() {
-  local fifo
-  fifo=$(command mktemp -u "${TMPDIR:-/tmp}/fishy-intr.XXXXXX") || return
-  command mkfifo -m 600 $fifo || return
-  exec {_fishy_intr_fd}<>$fifo      # O_RDWR on a FIFO never blocks or hits EOF
-  command rm -f $fifo
-  zle -F -w $_fishy_intr_fd fishy-intr-ready
-}
-_fishy_w_intr_ready() {
-  local byte
-  sysread -s 1 -i $_fishy_intr_fd byte 2>/dev/null
-  _fishy_w_ctrl_c
-}
-zle -N fishy-intr-ready _fishy_w_intr_ready
-_fishy_intr_setup
+# the trap is cut short by the pending interrupt. So the trap only sends a
+# no-op request to the async server; its reply wakes zle's input wait (zle -F)
+# and the handler runs clear-commandline as an ordinary widget.
+_fishy_async_done_intr() { _fishy_w_ctrl_c }
 
 functions[_fishy_prev_trapint]=${functions[TRAPINT]-}
 TRAPINT() {
-  if [[ -n $CONTEXT ]] && (( _fishy_intr_fd >= 0 )); then
-    syswrite -o $_fishy_intr_fd x 2>/dev/null
+  if [[ -n $CONTEXT ]] && fishy-async-send intr noop 2>/dev/null; then
     return 0
   fi
   if [[ -n ${functions[_fishy_prev_trapint]} ]]; then
@@ -139,6 +123,8 @@ TRAPINT() {
   return $(( 128 + $1 ))
 }
 
-# Start both servers now so the first prompt never waits for fish to boot.
+# Start both servers now and queue the theme request, so fish boots while the
+# rest of the shell starts; the first prompt only collects the answer.
 _fishy_ensure sync
 _fishy_ensure async
+fishy-theme-request

@@ -63,18 +63,41 @@ _fishy_face_sanitize() {
   REPLY=${(j:,:)keep}
 }
 
-# Fetch all faces in one request. Called once the server is up.
-fishy-theme-load() {
+# Faces are requested on the async server at load time and applied when the
+# reply arrives (_fishy_async_done_theme), so the first prompt never waits for
+# fish to boot. Until then the fallbacks below are used. The attribute probe
+# runs at the first line init (it needs zle).
+typeset -ga _fishy_theme_keys _fishy_theme_raw
+
+fishy-theme-request() {
   emulate -L zsh
-  local -a keys=(${(ok)_fishy_face_roles}) args=()
+  _fishy_theme_keys=(${(ok)_fishy_face_roles})
+  local -a args=()
   local k
-  for k in $keys; do args+=(${=_fishy_face_roles[$k]}); done
-  fishy-call sync face "${args[@]}" || return 1
-  (( ${#_fishy_zattrs} )) || _fishy_probe_zattrs
+  for k in $_fishy_theme_keys; do args+=(${=_fishy_face_roles[$k]}); done
+  fishy-async-send theme face "${args[@]}"
+}
+
+_fishy_theme_apply() {
+  (( ${#_fishy_theme_raw} )) || return
+  (( ${#_fishy_zattrs} )) || return   # probe not run yet (outside zle)
   local -i i=1
-  for k in $keys; do
-    _fishy_face_sanitize "${fishy_reply[i]#F$'\x1f'}"
+  local k
+  for k in $_fishy_theme_keys; do
+    _fishy_face_sanitize "${_fishy_theme_raw[i]#F$'\x1f'}"
     _fishy_face[$k]=$REPLY
     (( i++ ))
   done
+}
+
+_fishy_async_done_theme() {
+  shift
+  _fishy_theme_raw=("$@")
+  _fishy_theme_apply
+}
+
+# First line init: probe zle's attributes, apply faces if they already came.
+fishy-theme-collect() {
+  (( ${#_fishy_zattrs} )) || _fishy_probe_zattrs
+  _fishy_theme_apply
 }
