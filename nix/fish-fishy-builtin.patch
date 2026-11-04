@@ -30,10 +30,10 @@ index 87803da12..0115d126c 100644
      use super::{combine_command_and_autosuggestion, completion_apply_to_command_line};
 diff --git a/src/reader/reader/fishy.rs b/src/reader/reader/fishy.rs
 new file mode 100644
-index 000000000..590157d60
+index 000000000..e2f3fc5ce
 --- /dev/null
 +++ b/src/reader/reader/fishy.rs
-@@ -0,0 +1,1182 @@
+@@ -0,0 +1,1539 @@
 +//! `__fishy`: headless access to the reader's completion, autosuggestion, word
 +//! motion and history logic, so another line editor (zsh, via fishy-zsh) can
 +//! reproduce fish's interactive behavior exactly instead of approximating it.
@@ -82,6 +82,14 @@ index 000000000..590157d60
 +//!                                            server shares the shell's process group
 +//!   __fishy face (FG_ROLE BG_ROLE VALID_PATH FORCE_UNDERLINE)...
 +//!       F zsh_highlight_spec per group (resolved exactly like the reader's colors)
++//!
++//! Prompt and command lifecycle (O = raw bytes fish would write to the tty):
++//!   __fishy postexec STATUS MS CMD PIPESTATUS...       O
++//!   __fishy prompt-event FIRST COLS LINES STATUS PIPESTATUS...   O
++//!   __fishy prompt FINAL COLS LINES STATUS PIPESTATUS...
++//!       O bytes, L width lines ps1, R width rps1, X transient
++//!   __fishy exec CMD                                   O
++//!   __fishy capture FUNCTION ARGS...                   O
 +
 +use super::*;
 +use crate::builtins::{BuiltinResult, STATUS_INVALID_ARGS, SUCCESS};
@@ -91,7 +99,7 @@ index 000000000..590157d60
 +use fish_wcstringutil::string_fuzzy_match_string;
 +use crate::text_face::{ResettableStyle, TextFace};
 +use fish_color::Color;
-+use fish_widestring::decode_byte_from_char;
++use fish_widestring::{decode_byte_from_char, wcs2bytes};
 +use std::cell::RefCell;
 +
 +thread_local! {
@@ -109,8 +117,25 @@ index 000000000..590157d60
 +        out.push_utfstr(f);
 +    }
 +    out.push('\0');
-+    streams.out.append(&out);
++    let sent = REPLY_SINK.with(|sink| match sink.borrow_mut().as_mut() {
++        Some(buf) => {
++            buf.extend_from_slice(&wcs2bytes(&out));
++            true
++        }
++        None => false,
++    });
++    if !sent {
++        streams.out.append(&out);
++    }
 +}
++
++// The server's replies go to fd 3, written here rather than through a fish
++// `>&3` redirection: event handlers that fire while a redirection is active
++// (e.g. OSC 7 on a PWD change) write into it, which would corrupt the framing.
++thread_local! {
++    static REPLY_SINK: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
++}
++const REPLY_FD: i32 = 3;
 +
 +fn num(n: usize) -> WString {
 +    n.to_string().into()
@@ -470,8 +495,202 @@ index 000000000..590157d60
 +    parts.join(",").into()
 +}
 +
++// ---------------------------------------------------------------------------
++// Prompt, title and command-lifecycle output.
++//
++// In fish these bytes go straight to the terminal: event handlers, the title
++// and OSC 133 marks write to fds 1/2 directly (not through IoStreams, so no
++// redirection or pipe catches them). The server's replies travel on fd 3, so
++// fds 1/2 can be pointed at a scratch file for the duration and the bytes
++// handed to zsh in the order fish would have written them.
++
++thread_local! {
++    static CAPTURE: RefCell<Option<std::fs::File>> = const { RefCell::new(None) };
++}
++
++/// Run `f` with fds 1 and 2 writing into a scratch file; returns its contents.
++fn capture_fds<R>(f: impl FnOnce() -> R) -> (R, Vec<u8>) {
++    use std::io::{Read, Seek, SeekFrom};
++    use std::os::fd::AsRawFd;
++    CAPTURE.with(|cap| {
++        let mut cap = cap.borrow_mut();
++        if cap.is_none() {
++            // Unlinked right away: nothing is left behind if the server dies.
++            let tmp = fish_tempfile::new_file().expect("fishy: scratch file");
++            *cap = Some(tmp.get().try_clone().expect("fishy: scratch file"));
++        }
++        let file = cap.as_mut().unwrap();
++        let _ = file.set_len(0);
++        let _ = file.seek(SeekFrom::Start(0));
++        let fd = file.as_raw_fd();
++        // SAFETY: plain fd juggling on fds we own; restored before returning.
++        let (saved1, saved2) = unsafe { (libc::dup(1), libc::dup(2)) };
++        unsafe {
++            libc::dup2(fd, 1);
++            libc::dup2(fd, 2);
++        }
++        let r = f();
++        unsafe {
++            libc::dup2(saved1, 1);
++            libc::dup2(saved2, 2);
++            libc::close(saved1);
++            libc::close(saved2);
++        }
++        let mut bytes = vec![];
++        let _ = file.seek(SeekFrom::Start(0));
++        let _ = file.read_to_end(&mut bytes);
++        (r, bytes)
++    })
++}
++
++/// Raw terminal bytes as one record field (NULs would end the record; a
++/// terminal ignores them anyway).
++fn bytes_field(bytes: &[u8]) -> WString {
++    let clean: Vec<u8> = bytes.iter().copied().filter(|&b| b != 0).collect();
++    bytes2wcstring(&clean)
++}
++
++/// The program fish's `status current-command` reports at the prompt
++/// (`get_program_name()` in fish). This is zsh: titles say so.
++const PROGRAM: &wstr = L!("zsh");
++
++fn parse_int(s: &wstr) -> Option<i32> {
++    s.to_string().parse().ok()
++}
++
++/// COLUMNS LINES: what reader_update_termsize would read from the tty.
++fn set_termsize(parser: &mut Parser, cols: &wstr, lines: &wstr) {
++    let mode = ParserEnvSetMode::new(EnvMode::GLOBAL);
++    for (name, val) in [(L!("COLUMNS"), cols), (L!("LINES"), lines)] {
++        if parser.vars().get(name).is_none_or(|v| v.as_string() != val) {
++            parser.set_var_and_fire(name, mode, vec![val.to_owned()]);
++        }
++    }
++    termsize_update(parser);
++}
++
++/// STATUS PIPESTATUS...: zsh's $? and $pipestatus become fish's.
++fn set_statuses(parser: &Parser, status: &wstr, pipestatus: &[WString]) -> Option<()> {
++    let status = parse_int(status)?;
++    let mut pipe = vec![];
++    for p in pipestatus {
++        pipe.push(parse_int(p)?);
++    }
++    if pipe.is_empty() {
++        pipe.push(status);
++    }
++    parser.set_last_statuses(Statuses {
++        status,
++        kill_signal: None,
++        pipestatus: pipe,
++    });
++    Some(())
++}
++
++/// At the prompt fish resets `status current-command`/`commandline` and `$_`.
++fn reset_status_vars(parser: &mut Parser) {
++    parser.libdata_mut().status_vars.command = PROGRAM.to_owned();
++    parser.libdata_mut().status_vars.commandline = WString::new();
++    parser.set_one(
++        L!("_"),
++        ParserEnvSetMode::new(EnvMode::GLOBAL),
++        PROGRAM.to_owned(),
++    );
++}
++
++/// Reader::exec_prompt without a Reader: the mode, left and right prompts
++/// (stdout captured by exec_subshell like fish does), then the title.
++fn run_prompt(parser: &mut Parser, final_prompt: bool) -> (WString, WString) {
++    let _suppress_trace = parser.push_scope(|s| s.suppress_fish_trace = true);
++    let _noninteractive = parser.push_scope(|s| s.is_interactive = false);
++
++    let mut mode = WString::new();
++    if function::exists(MODE_PROMPT_FUNCTION_NAME, parser) {
++        mode = WString::from_iter(exec_prompt_cmd(parser, MODE_PROMPT_FUNCTION_NAME, final_prompt));
++    }
++
++    let left_cmd = if function::exists(LEFT_PROMPT_FUNCTION_NAME, parser) {
++        LEFT_PROMPT_FUNCTION_NAME
++    } else {
++        DEFAULT_PROMPT
++    };
++    let mut left = join_strings(&exec_prompt_cmd(parser, left_cmd, final_prompt), '\n');
++    if let Some(prefix) = parser.vars().get_unless_empty(L!("SHELL_PROMPT_PREFIX")) {
++        left.insert_utfstr(0, &prefix.as_string());
++    }
++    if let Some(suffix) = parser.vars().get_unless_empty(L!("SHELL_PROMPT_SUFFIX")) {
++        left.push_utfstr(&suffix.as_string());
++    }
++
++    let mut right = WString::new();
++    if function::exists(RIGHT_PROMPT_FUNCTION_NAME, parser) {
++        right = WString::from_iter(exec_prompt_cmd(parser, RIGHT_PROMPT_FUNCTION_NAME, final_prompt));
++    }
++
++    reader_write_title(L!(""), parser, false);
++    job_reap(parser, true, None);
++    // The screen draws the mode prompt in front of the left prompt.
++    (mode + &left[..], right)
++}
++
++/// Names in the directories of list variable `var` (with `suffix` stripped,
++/// entries without it skipped). A superset check before fish's exact lookups.
++fn dir_entries(
++    parser: &Parser,
++    var: &wstr,
++    suffix: Option<&str>,
++) -> std::collections::HashSet<WString> {
++    let mut names = std::collections::HashSet::new();
++    let Some(dirs) = parser.vars().get(var) else {
++        return names;
++    };
++    for dir in dirs.as_list() {
++        let Ok(rd) = std::fs::read_dir(fish_widestring::wcs2osstring(dir)) else {
++            continue;
++        };
++        for entry in rd.flatten() {
++            let raw = std::os::unix::ffi::OsStrExt::as_bytes(entry.file_name().as_os_str()).to_vec();
++            let raw = match suffix {
++                Some(sfx) => match raw.strip_suffix(sfx.as_bytes()) {
++                    Some(stem) => stem.to_vec(),
++                    None => continue,
++                },
++                None => raw,
++            };
++            names.insert(bytes2wcstring(&raw));
++        }
++    }
++    names
++}
++
 +pub fn fishy(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) -> BuiltinResult {
 +    let args: Vec<WString> = argv.iter().map(|a| (*a).to_owned()).collect();
++    // `__fishy reply ID [SUBCOMMAND ARGS...]`: run the subcommand, then write
++    // its records and the terminator \x1e ID to the reply fd in one go.
++    if args.get(1).is_some_and(|a| a == "reply") {
++        let Some(id) = args.get(2) else {
++            return Err(STATUS_INVALID_ARGS);
++        };
++        REPLY_SINK.with(|sink| *sink.borrow_mut() = Some(vec![]));
++        let res = if args.len() > 3 {
++            let rest: Vec<WString> = std::iter::once(args[0].clone())
++                .chain(args[3..].iter().cloned())
++                .collect();
++            dispatch(parser, streams, &rest)
++        } else {
++            Ok(SUCCESS)
++        };
++        let mut bytes = REPLY_SINK.with(|sink| sink.borrow_mut().take()).unwrap_or_default();
++        bytes.push(0x1e);
++        bytes.extend_from_slice(&wcs2bytes(id));
++        bytes.push(0);
++        let _ = write_loop(&REPLY_FD, &bytes);
++        return res;
++    }
++    dispatch(parser, streams, &args)
++}
++
++fn dispatch(parser: &mut Parser, streams: &mut IoStreams, args: &[WString]) -> BuiltinResult {
 +    let arg = |i: usize| args.get(i).map(|s| s.as_utfstr());
 +    let bad = Err(STATUS_INVALID_ARGS);
 +    match arg(1).map(|s| s.to_string()).as_deref() {
@@ -735,21 +954,31 @@ index 000000000..590157d60
 +            }
 +        }
 +        Some("define-commands") => {
++            // A zsh with compinit has ~2000 functions. fish's own lookups are
++            // exact but cost a stat per $PATH / function-path directory per
++            // name, so they only run for names some directory actually has.
++            let on_path = dir_entries(parser, L!("PATH"), None);
++            let fn_files = dir_entries(parser, L!("fish_function_path"), Some(".fish"));
++            let mut script = WString::new();
 +            for name in &args[2..] {
 +                // Never shadow anything fish already resolves (builtins such as
 +                // `read` are used by the server loop itself), and leave real
 +                // commands as commands.
-+                if name.is_empty()
-+                    || function::exists(name, parser)
++                if !crate::common::valid_func_name(name)
 +                    || crate::builtins::builtin_exists(name)
-+                    || crate::path::path_get_path(name, parser.vars()).is_some()
++                    || ((function::exists_no_autoload(name) || fn_files.contains(name))
++                        && function::exists(name, parser))
++                    || (on_path.contains(name)
++                        && crate::path::path_get_path(name, parser.vars()).is_some())
 +                {
 +                    continue;
 +                }
-+                let mut cmd: WString = L!("function ").into();
-+                cmd.push_utfstr(&escape(name));
-+                cmd.push_str("; end");
-+                let _ = parser.eval(&cmd, &crate::io::IoChain::new());
++                script.push_str("function ");
++                script.push_utfstr(&escape(name));
++                script.push_str("; end\n");
++            }
++            if !script.is_empty() {
++                let _ = parser.eval(&script, &crate::io::IoChain::new());
 +            }
 +        }
 +        Some("complete-tokens") => {
@@ -794,6 +1023,11 @@ index 000000000..590157d60
 +            }
 +        }
 +        Some("serve-init") => {
++            // No terminal was queried: XTVERSION is unknown (as for a terminal
++            // that does not answer), which OSC 133 marking needs initialized.
++            crate::tty_handoff::XTVERSION.get_or_init(WString::new);
++            // fish's greeting is fish saying hello; zsh is not fish.
++            let _ = parser.eval(L!("function fish_greeting; end"), &crate::io::IoChain::new());
 +            // The server runs in zsh's process group while zle is reading, so the
 +            // terminal's ^C / ^\ / ^Z would reach it; it must never react.
 +            for sig in [libc::SIGINT, libc::SIGQUIT, libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
@@ -823,6 +1057,129 @@ index 000000000..590157d60
 +                let face = resolver.resolve_spec(&spec, parser.vars());
 +                record(streams, &[L!("F"), &face_to_zsh(&face)]);
 +            }
++        }
++        Some("postexec") => {
++            // read_i after reader_run_command: CMD_DURATION, the status
++            // generation, OSC 133 D, fish_postexec, then the cursor is shown.
++            let (Some(status), Some(ms), Some(cmd)) = (arg(2), arg(3), arg(4)) else {
++                return bad;
++            };
++            if !tok_command(cmd).is_empty() {
++                parser.set_one(
++                    ENV_CMD_DURATION,
++                    ParserEnvSetMode::new(EnvMode::UNEXPORT),
++                    ms.to_owned(),
++                );
++            }
++            STATUS_COUNT.fetch_add(1, Ordering::Relaxed);
++            if set_statuses(parser, status, &args[5..]).is_none() {
++                return bad;
++            }
++            reset_status_vars(parser);
++            let ((), out) = capture_fds(|| {
++                BufferedOutputter::new(Outputter::stdoutput()).write_command(
++                    Osc133CommandFinished {
++                        exit_status: parser.last_status(),
++                    },
++                );
++                event::fire_generic(parser, L!("fish_postexec").to_owned(), vec![cmd.to_owned()]);
++                Outputter::stdoutput()
++                    .borrow_mut()
++                    .write_command(DecsetShowCursor);
++            });
++            record(streams, &[L!("O"), &bytes_field(&out)]);
++        }
++        Some("prompt-event") => {
++            // readline's start: abandon the line (PROMPT_SP; just \r the first
++            // time), then the fish_prompt event. The first event also runs
++            // __fish_on_interactive, exactly like the first interactive prompt.
++            let (Some(first), Some(cols), Some(lines), Some(status)) =
++                (arg(2), arg(3), arg(4), arg(5))
++            else {
++                return bad;
++            };
++            set_termsize(parser, cols, lines);
++            if set_statuses(parser, status, &args[6..]).is_none() {
++                return bad;
++            }
++            let width = (first != "1").then(|| termsize_last().width());
++            let mut out = crate::screen::fishy::abandon_line(width);
++            let ((), ev) = capture_fds(|| {
++                event::fire_generic(parser, L!("fish_prompt").to_owned(), vec![]);
++            });
++            out.extend_from_slice(&ev);
++            record(streams, &[L!("O"), &bytes_field(&out)]);
++        }
++        Some("prompt") => {
++            // exec_prompt + the layout the screen would draw.
++            //   O bytes            (stderr of the prompt functions, the title)
++            //   L width lines ps1  (left prompt incl. mode prompt, zsh syntax)
++            //   R width rps1       (right prompt, zsh syntax)
++            //   X transient(0/1)   (fish_transient_prompt, as read_i reads it)
++            let (Some(final_prompt), Some(cols), Some(lines), Some(status)) =
++                (arg(2), arg(3), arg(4), arg(5))
++            else {
++                return bad;
++            };
++            set_termsize(parser, cols, lines);
++            if set_statuses(parser, status, &args[6..]).is_none() {
++                return bad;
++            }
++            reset_status_vars(parser);
++            let ((left, right), out) = capture_fds(|| run_prompt(parser, final_prompt == "1"));
++            let width = termsize_last().width();
++            let l = crate::screen::fishy::zsh_prompt(&left, width, true);
++            let r = crate::screen::fishy::zsh_prompt(&right, width, false);
++            record(streams, &[L!("O"), &bytes_field(&out)]);
++            record(streams, &[L!("L"), &num(l.last_line_width), &num(l.lines), &l.text]);
++            record(streams, &[L!("R"), &num(r.last_line_width), &r.text]);
++            let transient = check_bool_var(parser.vars(), L!("fish_transient_prompt"), false);
++            record(streams, &[L!("X"), if transient { L!("1") } else { L!("0") }]);
++        }
++        Some("exec") => {
++            // read_i + reader_run_command before eval: OSC 133 C, fish_preexec,
++            // `status current-command`, the title for the command.
++            let Some(cmd) = arg(2) else {
++                return bad;
++            };
++            let ((), out) = capture_fds(|| {
++                let mut o = BufferedOutputter::new(Outputter::stdoutput());
++                o.reset_text_face();
++                o.write_command(Osc133CommandStart(cmd));
++                drop(o);
++                event::fire_generic(parser, L!("fish_preexec").to_owned(), vec![cmd.to_owned()]);
++                let ft = tok_command(cmd);
++                if !ft.is_empty() {
++                    parser.libdata_mut().status_vars.command = ft.clone();
++                    parser.libdata_mut().status_vars.commandline = cmd.to_owned();
++                    parser.set_one(L!("_"), ParserEnvSetMode::new(EnvMode::GLOBAL), ft);
++                }
++                reader_write_title(cmd, parser, true);
++                Outputter::stdoutput()
++                    .borrow_mut()
++                    .set_text_face(TextFace::terminal_default());
++            });
++            record(streams, &[L!("O"), &bytes_field(&out)]);
++        }
++        Some("capture") => {
++            // Run FUNCTION ARGS... (if defined) and return what it wrote to the
++            // terminal: e.g. __fish_update_cwd_osc when zsh's $PWD changes.
++            let Some(func) = arg(2) else {
++                return bad;
++            };
++            if !function::exists(func, parser) {
++                record(streams, &[L!("O"), L!("")]);
++                return Ok(SUCCESS);
++            }
++            let mut cmd = escape(func);
++            for a in &args[3..] {
++                cmd.push(' ');
++                cmd.push_utfstr(&escape(a));
++            }
++            let ((), out) = capture_fds(|| {
++                let _ = parser.eval(&cmd, &crate::io::IoChain::new());
++            });
++            record(streams, &[L!("O"), &bytes_field(&out)]);
 +        }
 +        _ => return bad,
 +    }
@@ -1215,4 +1572,181 @@ index 000000000..590157d60
 +    }
 +    *inout_cursor_pos = new_cursor_pos;
 +    result
++}
+diff --git a/src/screen.rs b/src/screen.rs
+index 8436cf370..e23d259fc 100644
+--- a/src/screen.rs
++++ b/src/screen.rs
+@@ -2532,3 +2532,6 @@ macro_rules! validate {
+         );
+     }
+ }
++
++// fishy-zsh: fish's prompt layout for zsh to draw.
++pub(crate) mod fishy;
+diff --git a/src/screen/fishy.rs b/src/screen/fishy.rs
+new file mode 100644
+index 000000000..d4aae7937
+--- /dev/null
++++ b/src/screen/fishy.rs
+@@ -0,0 +1,160 @@
++//! fishy-zsh: the screen's prompt handling, for the `__fishy prompt` builtin.
++//!
++//! zsh draws the prompt, so it needs fish's *result*: the prompt truncated
++//! exactly like `compute_layout` truncates it, the OSC 133 marks where
++//! `Screen::update` writes them, and every width as fish measures it. The
++//! prompt is returned in zsh prompt syntax so zsh's own width accounting
++//! cannot disagree with fish's: escape sequences become `%{...%}` and visible
++//! text becomes `%{text%NG%}` with N = fish's width for that text.
++
++use super::*;
++use crate::terminal::TerminalCommand;
++
++/// fish's PROMPT_SP sequence (`None`: the first prompt, just `\r`).
++pub(crate) fn abandon_line(screen_width: Option<usize>) -> Vec<u8> {
++    abandon_line_string(screen_width)
++}
++
++pub(crate) struct ZshPrompt {
++    /// The prompt in zsh prompt syntax (needs PROMPT_PERCENT; see `pct`).
++    pub(crate) text: WString,
++    /// Width of the last line, as `compute_layout` measures it.
++    pub(crate) last_line_width: usize,
++    /// Number of lines.
++    pub(crate) lines: usize,
++}
++
++/// zsh prompt-escape one piece of literal text: `%` is the only character
++/// zsh interprets once PROMPT_SUBST and PROMPT_BANG are off (bridge sets PS1
++/// through a parameter when they are on, so this stays sufficient).
++fn pct(out: &mut WString, s: &wstr) {
++    for c in s.chars() {
++        if c == '%' {
++            out.push('%');
++        }
++        out.push(c);
++    }
++}
++
++fn mark(cmd: TerminalCommand<'_>) -> WString {
++    let mut o = Outputter::new_buffering_no_assume_normal();
++    o.write_command(cmd);
++    fish_widestring::bytes2wcstring(&o.take_contents())
++}
++
++/// One prompt line (no line terminator) in zsh syntax.
++fn convert_line(out: &mut WString, line: &wstr, cache: &mut LayoutCache) -> usize {
++    // fish's width is that of the last run: '\r' is a run terminator that
++    // restarts the measurement (measure_run_from). Everything up to and
++    // including the last '\r' is therefore zero-width for zsh too.
++    let run_start = line
++        .as_char_slice()
++        .iter()
++        .rposition(|&c| c == '\r')
++        .map_or(0, |i| i + 1);
++    if run_start > 0 {
++        out.push_str("%{");
++        pct(out, &line[..run_start]);
++        out.push_str("%}");
++    }
++
++    let line = &line[run_start..];
++    let mut fish_width = 0usize; // measure_run_from's running width
++    let mut told_zsh = 0usize; // width already asserted to zsh with %G
++    let mut text = WString::new();
++    let flush = |out: &mut WString, text: &mut WString, fish_width: usize, told: &mut usize| {
++        if text.is_empty() {
++            return;
++        }
++        out.push_str("%{");
++        pct(out, text);
++        let glitch = fish_width.saturating_sub(*told);
++        if glitch > 0 {
++            out.push_str(&format!("%{glitch}G"));
++            *told += glitch;
++        }
++        out.push_str("%}");
++        text.clear();
++    };
++
++    let mut idx = 0;
++    while idx < line.len() {
++        let c = line.char_at(idx);
++        if c == '\x1B' {
++            let len = cache.escape_code_length(&line[idx..]);
++            if len > 0 {
++                flush(out, &mut text, fish_width, &mut told_zsh);
++                out.push_str("%{");
++                pct(out, &line[idx..idx + len]);
++                out.push_str("%}");
++                idx += len;
++            } else {
++                // Unrecognized: measure_run_from skips a lone ESC as width 0.
++                text.push(c);
++                idx += 1;
++            }
++            continue;
++        }
++        if c == '\t' {
++            fish_width = next_tab_stop(fish_width);
++        } else if let Ok(w) = usize::try_from(fish_wcwidth_visible(c)) {
++            fish_width += w;
++        } else {
++            fish_width = fish_width.saturating_sub(1);
++        }
++        text.push(c);
++        idx += 1;
++    }
++    flush(out, &mut text, fish_width, &mut told_zsh);
++    fish_width
++}
++
++/// `prompt` laid out for a `screen_width`-wide screen exactly like
++/// `compute_layout` + `Screen::update` do: truncated per line with an
++/// ellipsis, `ESC[K` before every line but the last, OSC 133 A before the
++/// first line and B after the last (when `marks`).
++pub(crate) fn zsh_prompt(prompt: &wstr, screen_width: usize, marks: bool) -> ZshPrompt {
++    let mut cache = LAYOUT_CACHE_SHARED.lock().unwrap();
++    let mut trunc = WString::new();
++    let layout = cache.calc_prompt_layout(prompt, Some(&mut trunc), screen_width);
++    let nlines = layout.line_starts.len();
++
++    let mut text = WString::new();
++    let mut last_line_width = 0;
++    for (i, &start) in layout.line_starts.iter().enumerate() {
++        let is_last = i + 1 == nlines;
++        // Line i ends at the terminator ('\n' or '\x0C') before the next start.
++        let end = if is_last {
++            trunc.len()
++        } else {
++            layout.line_starts[i + 1] - 1
++        };
++        if !is_last {
++            text.push_str("%{");
++            pct(&mut text, &mark(TerminalCommand::ClearToEndOfLine));
++            text.push_str("%}");
++        }
++        if marks && i == 0 {
++            text.push_str("%{");
++            pct(&mut text, &mark(TerminalCommand::Osc133PromptStart));
++            text.push_str("%}");
++        }
++        last_line_width = convert_line(&mut text, &trunc[start..end], &mut cache);
++        if !is_last {
++            // fish writes the terminator as is; for zsh a line break is '\n'
++            // (a form feed would leave zsh's idea of the column wrong).
++            text.push('\n');
++        }
++    }
++    if marks {
++        text.push_str("%{");
++        pct(&mut text, &mark(TerminalCommand::Osc133PromptEnd));
++        text.push_str("%}");
++    }
++    debug_assert_eq!(last_line_width, layout.last_line_width);
++    ZshPrompt {
++        text,
++        last_line_width: layout.last_line_width,
++        lines: nlines,
++    }
 +}

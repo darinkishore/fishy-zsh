@@ -1,0 +1,4 @@
+#! config pure-transient
+transient-one	'!echo hi'
+transient-two	'!echo hi' '!false'
+transient-multiline	'=echo "a' enter '=b"' enter

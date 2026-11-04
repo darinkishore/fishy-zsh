@@ -1,0 +1,32 @@
+diff --git a/Doc/Zsh/params.yo b/Doc/Zsh/params.yo
+index a4dd1a2ca..bff7c81fe 100644
+--- a/Doc/Zsh/params.yo
++++ b/Doc/Zsh/params.yo
+@@ -1947,5 +1947,9 @@ default as many terminals do not handle this correctly, in particular
+ when the prompt appears at the extreme bottom right of the screen.
+ Recent virtual terminals are more likely to handle this case correctly.
+ Some experimentation is necessary.
++
++With a value of 0 there is no spacing on the left of the right prompt
++either: it is shown as long as it fits on the line, even when it then
++touches the text before it.
+ )
+ enditem()
+diff --git a/Src/Zle/zle_refresh.c b/Src/Zle/zle_refresh.c
+index bd48eb6d3..633c942c2 100644
+--- a/Src/Zle/zle_refresh.c
++++ b/Src/Zle/zle_refresh.c
+@@ -1885,8 +1885,11 @@ zrefresh(void)
+ 	      /* sanity to avoid horrible things happening */
+ 	      if (rprompt_off < 0)
+ 		rprompt_off = 0;
+-	      put_rpmpt =
+-		(int)ZR_strlen(nbuf[0]) + rpromptw < winw - rprompt_off;
++	      /* An indent of 0 means no spacing at all: the right prompt may
++	       * also touch the text on its left (as fish draws it). */
++	      put_rpmpt = rprompt_off ?
++		(int)ZR_strlen(nbuf[0]) + rpromptw < winw - rprompt_off :
++		(int)ZR_strlen(nbuf[0]) + rpromptw <= winw;
+ 	    }
+ 	}
+     } else {

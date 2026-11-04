@@ -55,7 +55,20 @@
         src = zsh-src;
         # zle_display: display-only insertions/replacements (continuation indent,
         # case-flipped suggestion display). Not upstream.
-        patches = (old.patches or []) ++ [./nix/zsh-fishy-zle-display.patch];
+        # SIGINT_NEWLINE: option for the newline after an interrupted job (fish
+        # leaves that line to its PROMPT_SP). Not upstream.
+        # termquery: a use-after-free when .term.extensions is set before zle
+        # loads (with COLORTERM=truecolor, as Ghostty sets it). Upstreamable.
+        patches =
+          (old.patches or [])
+          ++ [
+            ./nix/zsh-fishy-zle-display.patch
+            ./nix/zsh-sigint-newline.patch
+            ./nix/zsh-termquery-extvar-uaf.patch
+            # ZLE_RPROMPT_INDENT=0: the right prompt may touch the text, as
+            # fish's fit rule allows (prompt + line + right prompt <= width).
+            ./nix/zsh-rprompt-indent0.patch
+          ];
         # yodl renders the docs; col (util-linux) is needed for run-help files.
         nativeBuildInputs = old.nativeBuildInputs ++ [yodl pkgs.unixtools.col];
         # A git checkout has no generated configure / docs; zsh's own bootstrap.
@@ -84,6 +97,11 @@
         "bin/fish" = "${pkgs.fish}/bin/fish";
         "bin/fishy-fish" = "${fishy-fish}/bin/fish";
         "fish-share" = "${pkgs.fish}/share/fish";
+        # harness/configs/pure: darin's prompt plugin (same store path as their
+        # home-manager config) and the VCS tools its prompt runs.
+        "fish-pure" = pkgs.fishPlugins.pure.src;
+        "bin/git" = "${pkgs.git}/bin/git";
+        "bin/jj" = "${pkgs.jujutsu}/bin/jj";
       };
     });
   };

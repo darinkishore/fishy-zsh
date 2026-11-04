@@ -1,0 +1,8 @@
+#! config rprompt
+# fish_right_prompt "RP": drawn ending in the last column while it fits (MI-06).
+rp-empty	@0.2
+rp-typed	'=echo hi'
+rp-fits-exactly	'=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+rp-one-too-many	'=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+rp-suggestion	'=git ch'
+rp-after-cmd	'!echo hi'

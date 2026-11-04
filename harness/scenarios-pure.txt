@@ -1,0 +1,28 @@
+#! config pure
+# name<TAB>steps: darin's pure prompt (harness/configs/pure) vs stock fish 4.9.3.
+# Fixture repos: projects/gitrepo (main, dirty), projects/jjrepo (seeded ids).
+
+pure-first	@0.2
+pure-after-true	'!true'
+pure-after-false	'!false'
+pure-pipestatus	'!false | true'
+pure-printf-noeol	'!printf foo'
+pure-empty-enter	enter
+pure-empty-after-false	'!false' enter
+pure-two-cmds	'!echo one' '!echo two'
+pure-duration	'!sleep 2.2' @2.3
+pure-duration-then-empty	'!sleep 2.2' @2.3 enter
+pure-git	'!cd projects/gitrepo'
+pure-jj	'!cd projects/jjrepo'
+pure-cd-up	'!cd projects/alpha/src' '!cd ..'
+pure-typing	'=echo hi'
+pure-suggest	'=git ch'
+pure-tab	'=git ch' tab
+pure-tab-pager	'=git ch' tab tab
+pure-multiline	'=echo "a' enter =b
+pure-ctrl-c-line	'=echo hi' ctrl-c
+pure-ctrl-c-cmd	'>sleep 5' @0.5 ctrl-c
+pure-long-path	'!mkdir -p dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd' '!cd dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd'
+pure-long-path-type	'!mkdir -p dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd' '!cd dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd' '=echo something long enough to wrap the line maybe'
+pure-resize	'!cd projects/alpha/src' resize:60x30 @0.5
+pure-resize-long-path	'!mkdir -p dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd' '!cd dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddd' '=echo typed' resize:50x30 @0.5

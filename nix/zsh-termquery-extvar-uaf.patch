@@ -1,0 +1,14 @@
+diff --git a/Src/Zle/termquery.c b/Src/Zle/termquery.c
+index f73072a7c..bf4fe0fc2 100644
+--- a/Src/Zle/termquery.c
++++ b/Src/Zle/termquery.c
+@@ -539,6 +539,9 @@ query_terminal(void) {
+ 	int enable = 0;
+ 	char *cterm;
+ 
++	/* handle_query() can augment EXTVAR (truecolor below), which frees
++	 * the array: fetch it afresh rather than keep a dangling pointer */
++	flist = getaparam(EXTVAR);
+ 	/* skip if the query or corresponding feature is already in the list */
+ 	for (f = flist; !last && !found && f && *f; f++) {
+ 	    /* just i=3(TQ_KITTYKB) is disabled by default */

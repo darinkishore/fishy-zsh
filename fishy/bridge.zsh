@@ -12,7 +12,7 @@
 # Every request carries an id; records belonging to an older (abandoned) request
 # are discarded, so ^C in the middle of a reply can never desynchronize us.
 
-zmodload zsh/system 2>/dev/null
+zmodload zsh/system zsh/datetime 2>/dev/null  # sysread/zselect, $EPOCHREALTIME
 
 typeset -gA _fishy_wfd _fishy_rfd _fishy_pid _fishy_envsig
 typeset -gi _fishy_seq=0
@@ -34,8 +34,11 @@ _fishy_start() {
   # No job control here: no "[n] pid" notice and no job table entry. The
   # server then shares zsh's process group, so it ignores terminal-generated
   # signals itself (`__fishy serve-init` in server.fish).
-  setopt local_options no_monitor no_notify
-  coproc __fish_force_load_default_theme=1 $FISHY_FISH -c "source ${(q)FISHY_DIR}/server.fish" 2>/dev/null
+  setopt local_options no_monitor no_notify no_multios
+  # Replies travel on fd 3: fish writes event handler output, titles and the
+  # like straight to fds 1/2 (no redirection catches them), so the protocol
+  # pipe must not be one of those. The prompt requests capture them.
+  coproc __fish_force_load_default_theme=1 $FISHY_FISH -c "source ${(q)FISHY_DIR}/server.fish" 3>&1 >/dev/null 2>/dev/null
   _fishy_pid[$name]="$!"
   exec {wfd}>&p {rfd}<&p
   _fishy_wfd[$name]=$wfd _fishy_rfd[$name]=$rfd _fishy_envsig[$name]=''
@@ -123,8 +126,11 @@ fishy-tell() {
 fishy-call() {
   emulate -L zsh
   local name=$1; shift
+  local -F t0=${FISHY_LOG:+$EPOCHREALTIME}
   fishy-send $name "$@" || return 1
-  fishy-recv $name $REPLY
+  fishy-recv $name $REPLY || return 1
+  [[ -n $FISHY_LOG ]] && fishy-log "recv[$name] $1 $(( (EPOCHREALTIME - t0) * 1000 ))ms"
+  return 0
 }
 
 # ---------------------------------------------------------------- async server

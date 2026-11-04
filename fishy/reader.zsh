@@ -806,11 +806,11 @@ typeset -gi _fishy_accept=0
 _fishy_screen_lines() {
   local text=$1
   local -i cols=${COLUMNS:-80} lines=1 col=0 w
-  local p=${(%)PS1}
-  p=${p//$'\e'\[[0-9;:]#[a-zA-Z]/}
-  local -a plines=("${(@ps:\n:)p}")
-  (( lines = ${#plines} ))
-  col=${(m)#plines[-1]}
+  # The prompt as fish laid it out (prompt.zsh).
+  (( lines = _fp_lines > 0 ? _fp_lines : 1 ))
+  _fishy_prompt_width; col=$REPLY
+  # A prompt that fills its line puts the command line on the next one.
+  (( _fp_lastw >= cols && cols > 0 )) && (( lines++ ))
   (( cols > 0 )) || cols=80
   while (( col > cols )); do (( col -= cols, lines++ )); done
   local c
@@ -848,15 +848,6 @@ fishy-unswap() {
 # Display-only edits (patched zle's `zle_display`): fish's continuation-line
 # indent, and the suggestion-case display of combine_command_and_autosuggestion.
 typeset -gi _fishy_has_zle_display=-1
-_fishy_prompt_width() {
-  local p=${(%)PS1}
-  p=${p//$'\e'\[[0-9;:?]#[a-zA-Z]/}
-  p=${p//$'\e'\][^$'\a']#$'\a'/}
-  p=${p##*$'\n'}
-  local -i w=${(m)#p}
-  (( w >= ${COLUMNS:-80} )) && w=0      # prompt fills the line: no indent
-  REPLY=$w
-}
 _fishy_display_edits() {
   reply=()
   if (( _fishy_has_zle_display < 0 )); then

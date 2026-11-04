@@ -1,0 +1,58 @@
+diff --git a/Doc/Zsh/options.yo b/Doc/Zsh/options.yo
+index 6f3bef189..fb6fdac91 100644
+--- a/Doc/Zsh/options.yo
++++ b/Doc/Zsh/options.yo
+@@ -1565,6 +1565,16 @@ tt(POSIX_JOBS) in order for the builtin command tt(wait) to return the
+ status of background jobs that had already exited.  This is no longer
+ the case.
+ )
++pindex(SIGINT_NEWLINE)
++pindex(NO_SIGINT_NEWLINE)
++pindex(SIGINTNEWLINE)
++pindex(NOSIGINTNEWLINE)
++item(tt(SIGINT_NEWLINE) <D>)(
++When a foreground job is interrupted by tt(SIGINT) and no job status is
++reported for it, print a newline so that the next output starts on a fresh
++line.  Unset it when the prompt itself takes care of output left without a
++final newline (as tt(PROMPT_SP) does).
++)
+ enditem()
+ 
+ subsect(Prompting)
+diff --git a/Src/jobs.c b/Src/jobs.c
+index fef3c708e..07000926b 100644
+--- a/Src/jobs.c
++++ b/Src/jobs.c
+@@ -1335,7 +1335,7 @@ printjob(Job jn, int lng, int synch)
+ 	    fline = 0;
+ 	}
+ 	fflush(fout);
+-    } else if (doputnl && interact && !synch) {
++    } else if (doputnl && interact && !synch && isset(SIGINTNEWLINE)) {
+ 	doneprint = 1;
+ 	putc('\n', fout);
+ 	fflush(fout);
+diff --git a/Src/options.c b/Src/options.c
+index 9bf56cf81..2bd3ed624 100644
+--- a/Src/options.c
++++ b/Src/options.c
+@@ -251,6 +251,7 @@ static struct optname optns[] = {
+ {{NULL, "shortloops",	      OPT_EMULATE|OPT_NONBOURNE},SHORTLOOPS},
+ {{NULL, "shortrepeat",	      OPT_EMULATE},              SHORTREPEAT},
+ {{NULL, "shwordsplit",	      OPT_EMULATE|OPT_BOURNE},	 SHWORDSPLIT},
++{{NULL, "sigintnewline",      OPT_ALL},			 SIGINTNEWLINE},
+ {{NULL, "singlecommand",      OPT_SPECIAL},		 SINGLECOMMAND},
+ {{NULL, "singlelinezle",      OPT_KSH},			 SINGLELINEZLE},
+ {{NULL, "sourcetrace",        0},			 SOURCETRACE},
+diff --git a/Src/zsh.h b/Src/zsh.h
+index d45403e0b..6b7449d7c 100644
+--- a/Src/zsh.h
++++ b/Src/zsh.h
+@@ -2531,6 +2531,7 @@ enum {
+     SHORTLOOPS,
+     SHORTREPEAT,
+     SHWORDSPLIT,
++    SIGINTNEWLINE,
+     SINGLECOMMAND,
+     SINGLELINEZLE,
+     SOURCETRACE,

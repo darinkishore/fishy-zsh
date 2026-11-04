@@ -6,11 +6,14 @@
 # Everything here is spelled `builtin ...`: user functions (or the stubs that
 # define-commands creates for zsh-only names) must never shadow the loop.
 #
-# Protocol (stdin -> stdout), every record NUL-terminated, fields \x1f-separated:
+# Protocol (stdin -> fd 3), every record NUL-terminated, fields \x1f-separated.
+# fds 1/2 are not the protocol: fish writes some output (event handlers,
+# titles) straight to them, and the prompt requests capture it there.
 #   request : ID \x1f CWD \x1f SUBCOMMAND \x1f ARGS...
 #             SUBCOMMAND is a `__fishy` subcommand, or `env` whose ARGS are
 #             NAME=VALUE pairs replacing the exported environment.
 #   reply   : the `__fishy` records, then the terminator  \x1e ID
+#             (`__fishy reply` writes both to fd 3 itself; see fishy.rs)
 
 function __fishy_serve
     while builtin read --null --local req
@@ -19,10 +22,10 @@ function __fishy_serve
         builtin cd -- $f[2] 2>/dev/null
         if builtin test "$f[3]" = env
             __fishy_set_env $f[4..]
+            builtin __fishy reply $id
         else
-            builtin __fishy $f[3..]
+            builtin __fishy reply $id $f[3..]
         end
-        builtin printf '\x1e%s\0' $id
     end
 end
 
@@ -43,4 +46,12 @@ function __fishy_set_env
 end
 
 builtin __fishy serve-init
+
+# Shell state belongs to zsh. Tools that hook both shells keep their zsh hook
+# (zsh's config runs it) and lose the fish one here: direnv's vendor_conf.d
+# hook loads even in non-interactive fish and would run on every fish_prompt
+# event, changing the server's environment behind zsh's back.
+for f in __direnv_export_eval __direnv_export_eval_2
+    builtin functions --erase $f
+end
 __fishy_serve

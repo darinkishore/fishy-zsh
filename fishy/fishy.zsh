@@ -8,9 +8,12 @@
 [[ -o interactive && -o zle ]] || return 0
 
 typeset -g FISHY_DIR=${${(%):-%x}:A:h}
+
+# Boot the fish servers first (unless start.zsh already did, earlier in the
+# startup files), so fish starts while the rest of fishy loads.
+(( ${_fishy_started_early:-0} )) || source $FISHY_DIR/start.zsh
 autoload -Uz add-zle-hook-widget
 
-source $FISHY_DIR/bridge.zsh
 source $FISHY_DIR/editline.zsh
 source $FISHY_DIR/highlight.zsh
 source $FISHY_DIR/indent.zsh
@@ -22,6 +25,7 @@ source $FISHY_DIR/reader.zsh
 source $FISHY_DIR/keys.zsh
 source $FISHY_DIR/paste.zsh
 source $FISHY_DIR/integrations.zsh
+source $FISHY_DIR/prompt.zsh
 
 # fishy owns POSTDISPLAY, region_highlight and every widget. Detach the usual
 # plugins that would fight over them if they were loaded before us.
@@ -35,14 +39,13 @@ if (( $+functions[_zsh_highlight__zle-line-pre-redraw] )); then
   add-zle-hook-widget -d line-finish _zsh_highlight__zle-line-finish
 fi
 
-# Cursor shape: under nix-darwin, Ghostty's fish integration never loads (fish
+# Ghostty's shell integration: under nix-darwin it never loads for fish (fish
 # builds its vendor_conf.d list from the Nix profiles, not XDG_DATA_DIRS), so
-# fish keeps the terminal's default block cursor. Ghostty's zsh integration
-# would switch to a bar; drop its `cursor` feature (read at the first precmd)
-# so zsh looks like fish. Set FISHY_GHOSTTY_CURSOR=1 to keep Ghostty's bar.
-if [[ -n $GHOSTTY_SHELL_FEATURES && $FISHY_GHOSTTY_CURSOR != 1 ]]; then
-  GHOSTTY_SHELL_FEATURES=${(j:,:)${(@)${(s:,:)GHOSTTY_SHELL_FEATURES}:#cursor*}}
-fi
+# what Ghostty sees from fish is fish's own OSC 133 marks, OSC 7, titles and
+# the default block cursor. fishy writes exactly those (prompt.zsh), so the zsh
+# integration, which would add its own marks, title, cwd reports, bar cursor
+# and sudo/ssh wrappers, is dropped before its deferred init (first precmd).
+precmd_functions=(${precmd_functions:#_ghostty_deferred_init})
 
 # fish reads ctrl-s (pager-toggle-search) and ctrl-q; don't let the tty eat
 # them as XOFF/XON flow control.
@@ -70,15 +73,6 @@ _fishy_sync_commands() {
   _fishy_cmds_sig=$sig
 }
 
-_fishy_precmd() {
-  _fishy_sync_commands
-  # Make the last command searchable/suggestible and saved (fish: resolve_pending
-  # after the command finishes), and pick up exported-environment changes.
-  fishy-tell sync history-resolve
-  _fishy_sync_env sync
-  _fishy_sync_env async
-}
-
 _fishy_line_init() {
   (( ${#_fishy_face} )) || fishy-theme-collect
   fishy-reader-line-init
@@ -87,6 +81,7 @@ _fishy_line_init() {
 # fish's final rendering keeps the syntax colors but drops the suggestion and
 # the pager.
 _fishy_line_finish() {
+  _fishy_prompt_line_finish
   fishy-pager-clear
   fishy-suggest-clear
   fishy-render
@@ -96,8 +91,7 @@ zle -N fishy-async-ready _fishy_w_async_ready
 add-zle-hook-widget line-init _fishy_line_init
 add-zle-hook-widget line-pre-redraw fishy-render
 add-zle-hook-widget line-finish _fishy_line_finish
-autoload -Uz add-zsh-hook
-add-zsh-hook precmd _fishy_precmd
+fishy-prompt-install
 
 fishy-keys-install
 # darin's fish layers atuin and fzf on top of the defaults; so does fishy
@@ -123,8 +117,5 @@ TRAPINT() {
   return $(( 128 + $1 ))
 }
 
-# Start both servers now and queue the theme request, so fish boots while the
-# rest of the shell starts; the first prompt only collects the answer.
-_fishy_ensure sync
-_fishy_ensure async
+# Queue the theme request: the first prompt only collects the answer.
 fishy-theme-request

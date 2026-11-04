@@ -19,7 +19,9 @@ Step syntax (one CLI arg per step):
   cmd-left/cmd-right/cmd-backspace   Ghostty default: ^A / ^E / ^U
   ctrl-left/ctrl-right/shift-left/shift-right/alt-up/alt-down   xterm CSI
   @0.5           sleep 0.5s on top of the automatic settle
-  !cmd           type cmd + enter (setup steps)
+  resize:80x30   resize the terminal
+  !cmd           type cmd + enter, then wait for the prompt to come back
+  >cmd           type cmd + enter, don't wait (e.g. to interrupt it)
 
 Examples:
   uv run harness/fz.py shot '=git ch' tab
@@ -40,10 +42,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEPS = ROOT / "deps"
-SANDBOX = ROOT / ".sandbox"
+# Outside any repository: prompts run git/jj (pure), which must neither find
+# this checkout nor contend for its lock from parallel scenarios.
+SANDBOX = Path(os.environ.get("FISHY_SANDBOX", "/private/tmp/fishy-zsh-sandbox"))
 COLS, ROWS = 100, 30
 SHELLS = ("fish", "zsh")
 PREFIX = "fishy-"  # termctrl session name prefix
+
+# Fish config both shells get (harness/configs/NAME, or the neutral
+# harness/fish-config.fish for "plain"). Set by --config or a scenario file's
+# "#! config NAME" line.
+CONFIG = "plain"
 
 GHOSTTY = Path("/Applications/Ghostty.app/Contents")
 GHOSTTY_RES = GHOSTTY / "Resources" / "ghostty"
@@ -163,7 +172,10 @@ def build_home(shell: str, tag: str = "shot") -> Path:
     base = 1_760_000_000
     cfg = home / ".config" / "fish"
     cfg.mkdir(parents=True)
-    shutil.copy(ROOT / "harness" / "fish-config.fish", cfg / "config.fish")
+    if CONFIG == "plain":
+        shutil.copy(ROOT / "harness" / "fish-config.fish", cfg / "config.fish")
+    else:
+        install_config(CONFIG, home, cfg)
     data = home / ".local" / "share" / "fish"
     data.mkdir(parents=True)
     lines = []
@@ -176,6 +188,46 @@ def build_home(shell: str, tag: str = "shot") -> Path:
         zdata.mkdir(parents=True)
         (zdata / "history").write_text("".join(f"{c}\n" for c in HISTORY))
     return home
+
+
+def install_config(name: str, home: Path, cfg: Path) -> None:
+    """A named fish config (harness/configs/NAME) plus the fixtures it needs."""
+    src = ROOT / "harness" / "configs" / name
+    shutil.copytree(src, cfg, dirs_exist_ok=True)
+    if not name.startswith("pure"):
+        return
+    # darin's pure: the nixpkgs plugin, loaded the way home-manager's
+    # conf.d/plugin-pure.fish does, with their jj/git override functions.
+    (cfg / "conf.d").mkdir(exist_ok=True)
+    (cfg / "conf.d" / "plugin-pure.fish").write_text(
+        (ROOT / "harness" / "configs" / "plugin-pure.fish.in")
+        .read_text()
+        .replace("@PURE@", str((DEPS / "fish-pure").resolve()))
+    )
+    # Deterministic repos: same ids and timestamps in both shells' sandboxes.
+    fixed = {
+        "HOME": str(home),
+        "PATH": f"{DEPS / 'bin'}:/usr/bin:/bin",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+        "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+        "JJ_RANDOMNESS_SEED": "1", "JJ_TIMESTAMP": "2026-01-01T00:00:00Z",
+        "JJ_USER": "t", "JJ_EMAIL": "t@t",
+    }
+    def run(cwd: Path, *argv: str) -> None:
+        subprocess.run(argv, cwd=cwd, env=fixed, check=True, capture_output=True)
+    g = home / "projects" / "gitrepo"
+    g.mkdir(parents=True)
+    run(g, "git", "init", "-q", "-b", "main")
+    (g / "f").write_text("x\n")
+    run(g, "git", "add", "f")
+    run(g, "git", "commit", "-q", "-m", "init")
+    (g / "f").write_text("dirty\n")
+    j = home / "projects" / "jjrepo"
+    j.mkdir(parents=True)
+    run(j, "jj", "git", "init")
 
 
 def shell_env(shell: str, home: Path) -> dict[str, str]:
@@ -295,7 +347,8 @@ class Screen:
 
 
 def parse_json(doc: dict) -> Screen:
-    rows: list[list[tuple[str, Style]]] = [[(" ", PLAIN)] * COLS for _ in range(ROWS)]
+    ncols, nrows = doc.get("cols", COLS), doc.get("rows", ROWS)  # after resize:WxH
+    rows: list[list[tuple[str, Style]]] = [[(" ", PLAIN)] * ncols for _ in range(nrows)]
     for c in doc["cells"]:
         a = c["attributes"]
         st = Style(
@@ -308,10 +361,10 @@ def parse_json(doc: dict) -> Screen:
         )
         text = c["text"] or " "
         x, y = c["x"], c["y"]
-        if y < ROWS and x < COLS:
+        if y < nrows and x < ncols:
             rows[y][x] = (text, st)
             for k in range(1, c.get("width", 1)):  # wide char continuation
-                if x + k < COLS:
+                if x + k < ncols:
                     rows[y][x + k] = ("", st)
     cur = doc["cursor"]
     sig = json.dumps([doc["cells"], cur], sort_keys=True)
@@ -366,13 +419,13 @@ def start(shell: str, tag: str = "shot") -> str:
 
 
 def wait_prompt(name: str) -> None:
-    """Wait for the neutral "> " prompt with the cursor right after it."""
+    """Wait for the prompt ("> ", or pure's "❯ ") with the cursor right after it."""
     t0 = time.monotonic()
     s = capture(name)
     while time.monotonic() - t0 < 10:
         s = capture(name)
         cx, cy = s.cursor
-        if cx == 2 and s.text(mark_cursor=False)[cy].startswith(">"):
+        if cx == 2 and s.text(mark_cursor=False)[cy][:1] in (">", "❯"):
             settle(name, quiet=0.3)
             return
         time.sleep(0.05)
@@ -383,21 +436,42 @@ def send(name: str, step: str) -> None:
     if step.startswith("@"):
         time.sleep(float(step[1:]))
         return
+    if step.startswith("resize:"):
+        cols, _, rows = step.removeprefix("resize:").partition("x")
+        termctrl("resize", "--cols", cols, "--rows", rows, name)
+        return
     if step.startswith("="):
         data = step[1:].encode()
-    elif step.startswith("!"):
+    elif step.startswith(("!", ">")):
         data = step[1:].encode() + b"\r"
     else:
         data = key_bytes(step)
     termctrl("send", name, "--stdin", stdin=data)
 
 
+def wait_prompt_again(name: str, before: int) -> None:
+    """After a command: wait until a prompt is drawn below row `before`."""
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 10:
+        s = capture(name)
+        cx, cy = s.cursor
+        if cy > before and cx == 2 and s.text(mark_cursor=False)[cy][:1] in (">", "❯"):
+            settle(name, quiet=0.3)
+            return
+        time.sleep(0.05)
+    raise RuntimeError(f"{name}: prompt never came back:\n" + "\n".join(capture(name).text()))
+
+
 def run_one(shell: str, steps: list[str], tag: str) -> Screen:
     name = start(shell, tag)
     wait_prompt(name)
     for step in steps:
+        row = capture(name).cursor[1]
         send(name, step)
-        settle(name)
+        if step.startswith("!"):
+            wait_prompt_again(name, row)
+        else:
+            settle(name)
     screen = settle(name)
     termctrl("stop", name, check=False)
     return screen
@@ -468,10 +542,15 @@ def report(screens: dict[str, Screen], quiet: bool = False) -> int:
 # ---------------------------------------------------------------- suite
 
 def load_scenarios(path: Path) -> list[tuple[str, list[str]]]:
-    """Lines: NAME <tab> steps (shell-quoted). '#' comments, blank lines ignored."""
+    """Lines: NAME <tab> steps (shell-quoted). '#' comments, blank lines ignored.
+    A "#! config NAME" line selects the fish config for the whole file."""
     import shlex
+    global CONFIG
     out = []
     for line in path.read_text().splitlines():
+        if line.startswith("#! config "):
+            CONFIG = line.split()[2]
+            continue
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         name, _, rest = line.partition("\t")
@@ -512,10 +591,12 @@ def run_suite(path: Path, only: list[str], jobs: int, verbose: bool) -> int:
 
 
 def main() -> None:
+    global CONFIG
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     shot = sub.add_parser("shot", help="run steps in both shells and diff")
     shot.add_argument("--only", choices=SHELLS)
+    shot.add_argument("--config", default="plain", help="fish config (harness/configs/NAME)")
     shot.add_argument("steps", nargs="*")
     suite = sub.add_parser("suite", help="run scenario file, compare every scenario")
     suite.add_argument("--file", default=str(ROOT / "harness" / "scenarios.txt"))
@@ -526,6 +607,7 @@ def main() -> None:
 
     match args.cmd:
         case "shot":
+            CONFIG = args.config
             shells = [args.only] if args.only else list(SHELLS)
             screens = run_all(shells, args.steps)
             sys.exit(1 if report(screens) else 0)
