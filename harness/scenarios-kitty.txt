@@ -1,0 +1,60 @@
+# name<TAB>steps: keys that only work, or only work this way, under kitty's
+# keyboard protocol (fish and fishy turn it on; the harness encodes keys the
+# way Ghostty does for the flags the shell set). Run with FISHY_KEYS=legacy
+# too: the same keys as a legacy terminal sends them.
+
+ctrl-backspace-token	'=echo foo/bar baz' ctrl-backspace
+ctrl-backspace-twice	'=echo foo/bar baz' ctrl-backspace ctrl-backspace
+ctrl-delete-token	'=echo foo bar' home ctrl-delete
+alt-delete-word	'=echo foo bar' home alt-delete
+shift-enter-newline	'=echo a' shift-enter '=echo b'
+alt-enter-newline	'=echo a' alt-enter '=echo b'
+ctrl-enter-execute	'=echo hi' ctrl-enter
+ctrl-m-execute	'=echo hi' ctrl-m
+ctrl-j-execute	'=echo hi' ctrl-j
+ctrl-shift-z-redo	'=echo abc' ctrl-z ctrl-shift-z
+ctrl-z-undo	'=echo abc' ctrl-z
+ctrl-underscore-undo	'=echo abc' ctrl-_
+ctrl-slash-undo	'=echo abc' ctrl-/
+alt-slash-redo	'=echo abc' ctrl-z alt-/
+ctrl-i-complete	'=cd Doc' ctrl-i
+ctrl-tab-nothing	'=cd Doc' ctrl-tab
+tab-complete	'=cd Doc' tab
+escape-cancels-pager	'=git ch' tab escape
+ctrl-bracket-cancels-pager	'=git ch' tab ctrl-[
+escape-then-type	'=git ch' tab escape '=x'
+ctrl-c-clears	'=echo hi' ctrl-c
+ctrl-c-empty	ctrl-c
+ctrl-d-deletes	'=abc' home ctrl-d
+ctrl-q-ignored	'=abc' ctrl-q '=d'
+ctrl-space-empty	ctrl-space
+ctrl-space-line	'=echo' ctrl-space '=x'
+shift-space	'=echo' shift-space '=x'
+shift-backspace	'=echo ab' shift-backspace
+ctrl-alt-backspace	'=echo foo bar' ctrl-alt-backspace
+alt-backspace-word	'=echo foo bar' alt-backspace
+alt-hash-comment	'=echo hi' alt-#
+alt-lt-gt-buffer	'=echo a' shift-enter '=echo b' alt-< '=X' alt-> '=Y'
+alt-dot-token	'!echo first second' alt-.
+alt-up-token	'!echo first second' alt-up
+alt-u-upcase	'=echo abc' alt-b alt-u
+alt-B-uppercase-unbound	'=echo abc' alt-B
+up-history	up
+up-down-history	up up down
+ctrl-p-ctrl-n	ctrl-p ctrl-p ctrl-n
+ctrl-a-ctrl-e	'=echo abc' ctrl-a '=X' ctrl-e '=Y'
+ctrl-k-ctrl-y	'=echo abc def' alt-b ctrl-k ctrl-a ctrl-y
+ctrl-w-path	'=ls projects/alpha/src' ctrl-w
+ctrl-u-line	'=echo abc' ctrl-u
+ctrl-t-transpose	'=echo ab' ctrl-t
+ctrl-f-accept	'=git ch' ctrl-f
+ctrl-l-clear	'!echo one' ctrl-l
+shift-tab-search	'=git ch' shift-tab
+shift-arrows	'=echo foo-bar baz' shift-left shift-left '=X' shift-right '=Y'
+ctrl-arrows	'=echo foo-bar baz' ctrl-left ctrl-left '=X' ctrl-right '=Y'
+home-end	'=echo abc' home '=X' end '=Y'
+f1-unknown	'=nosuchcommandxyz' f1
+paste-plain	paste:hello\nworld
+unicode-text	'=echo héllo wörld'
+opt-arrows	'=echo foo bar' opt-left opt-left '=X' opt-right '=Y'
+cmd-keys	'=echo foo bar' cmd-left '=X' cmd-right '=Y' cmd-backspace

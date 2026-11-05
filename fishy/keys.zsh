@@ -42,11 +42,15 @@ zle -N fishy-down-or-search _fishy_w_down_or_search
 # as ONE edit (this decides undo granularity). A key read when nothing more is
 # pending is handled on its own (the Key event path). Keys bound to
 # `self-insert expand-abbr` end the batch and then run expand-abbr.
-typeset -g _fishy_expand_chars=' ;|&><)'
+# Printable keys whose binding is not plain self-insert (from the binding
+# table, see fishy-keys-install): "e" self-insert expand-abbr, "o" anything
+# else (they end a batch).
+typeset -gA _fishy_print_bind
 _fishy_is_self_insert_key() {
   local k=$1
   [[ ${#k} == 1 ]] || return 1
-  [[ $k == [[:print:]] || $k == [^[:ascii:]] ]]
+  [[ $k == [[:print:]] || $k == [^[:ascii:]] ]] || return 1
+  [[ ${_fishy_print_bind[$k]} != o ]]
 }
 #
 # The key that ends a batch is handled in the same fish event loop iteration
@@ -60,7 +64,7 @@ _fishy_w_self_insert() {
   local -i expand_after_acc=0 deferred=0
   while (( PENDING > 0 )); do
     acc+=$k
-    if [[ $_fishy_expand_chars == *"$k"* ]]; then
+    if [[ ${_fishy_print_bind[$k]} == e ]]; then
       expand_after_acc=1 k=''
       break
     fi
@@ -77,7 +81,7 @@ _fishy_w_self_insert() {
   fi
   if [[ -n $k ]]; then
     _fishy_insert "$k"
-    [[ $_fishy_expand_chars == *"$k"* ]] && _fishy_run expand-abbr
+    [[ ${_fishy_print_bind[$k]} == e ]] && _fishy_run expand-abbr
   fi
 }
 zle -N fishy-self-insert _fishy_w_self_insert
@@ -89,6 +93,14 @@ _fishy_w_ctrl_space() {
   [[ -n $BUFFER ]] && _fishy_insert ' '
 }
 zle -N fishy-ctrl-space _fishy_w_ctrl_space
+
+# shift-space: insert a space, then expand-abbr.
+_fishy_w_shift_space() {
+  fishy-unswap
+  _fishy_insert ' '
+  _fishy_run expand-abbr
+}
+zle -N fishy-shift-space _fishy_w_shift_space
 
 # alt-enter / shift-enter: insert a newline, then expand-abbr.
 _fishy_w_newline() {
@@ -126,49 +138,162 @@ _fishy_w_paste() {
 }
 zle -N fishy-bracketed-paste _fishy_w_paste
 
+# fish 4.9.3's preset bindings for the default (emacs) mode, in the order
+# `bind` lists them (fish_default_key_bindings + __fish_shared_key_bindings;
+# TERM=xterm-ghostty, so no conemu clipboard binding). -s: fish code rather
+# than readline functions.
+fishy-bind ctrl-y fishy-yank
+fishy-bind alt-y fishy-yank-pop
+fishy-bind right fishy-forward-char
+fishy-bind left fishy-backward-char
+fishy-bind ctrl-right fishy-forward-token
+fishy-bind ctrl-left fishy-backward-token
+fishy-bind pageup fishy-beginning-of-history
+fishy-bind pagedown fishy-end-of-history
+fishy-bind -s ctrl-x fishy-clipboard-copy
+fishy-bind -s ctrl-v fishy-clipboard-paste
+fishy-bind escape fishy-cancel
+fishy-bind 'ctrl-[' fishy-cancel
+fishy-bind tab fishy-complete
+fishy-bind ctrl-i fishy-complete
+fishy-bind ctrl-s fishy-pager-toggle-search
+fishy-bind shift-tab fishy-complete-and-search
+fishy-bind shift-delete fishy-shift-delete
+fishy-bind down fishy-down-or-search
+fishy-bind up fishy-up-or-search
+fishy-bind shift-right fishy-forward-bigword
+fishy-bind shift-left fishy-backward-bigword
+fishy-bind alt-b fishy-prevd-or-backward-word
+fishy-bind alt-f fishy-nextd-or-forward-word
+fishy-bind alt-right fishy-nextd-or-forward-word
+fishy-bind $'\e[1;9C' fishy-nextd-or-forward-word
+fishy-bind alt-left fishy-prevd-or-backward-word
+fishy-bind $'\e[1;9D' fishy-prevd-or-backward-word
+fishy-bind alt-up fishy-history-token-search-backward
+fishy-bind alt-down fishy-history-token-search-forward
+fishy-bind $'\e[1;9A' fishy-history-token-search-backward
+fishy-bind $'\e[1;9B' fishy-history-token-search-forward
+fishy-bind alt-. fishy-history-token-search-backward
+fishy-bind -s alt-l fishy-list-token
+fishy-bind -s alt-o fishy-preview
+fishy-bind -s alt-w fishy-whatis
+fishy-bind -s ctrl-l fishy-ctrl-l
+fishy-bind ctrl-c fishy-ctrl-c
+fishy-bind ctrl-u fishy-backward-kill-line
+fishy-bind ctrl-k fishy-kill-line
+fishy-bind ctrl-w fishy-backward-kill-path-component
+fishy-bind end fishy-end-of-line
+fishy-bind home fishy-beginning-of-line
+fishy-bind -s alt-d fishy-alt-d
+fishy-bind ctrl-d fishy-delete-or-exit
+fishy-bind -s alt-s fishy-prepend-sudo
+fishy-bind -s f1 fishy-man-page
+fishy-bind -s alt-h fishy-man-page
+fishy-bind -s alt-p fishy-paginate
+fishy-bind -s 'alt-#' fishy-toggle-comment
+fishy-bind -s alt-e fishy-edit-command-buffer
+fishy-bind -s alt-v fishy-edit-command-buffer
+fishy-bind '' @self-insert
+fishy-bind space @self-insert-expand
+fishy-bind ';' @self-insert-expand
+fishy-bind '|' @self-insert-expand
+fishy-bind '&' @self-insert-expand
+fishy-bind '>' @self-insert-expand
+fishy-bind '<' @self-insert-expand
+fishy-bind -s shift-enter fishy-newline
+fishy-bind -s alt-enter fishy-newline
+fishy-bind ')' @self-insert-expand
+fishy-bind -s ctrl-space fishy-ctrl-space
+fishy-bind -s shift-space fishy-shift-space
+fishy-bind enter fishy-execute
+fishy-bind ctrl-j fishy-execute
+fishy-bind ctrl-m fishy-execute
+fishy-bind ctrl-enter fishy-execute
+fishy-bind delete fishy-delete-char
+fishy-bind backspace fishy-backward-delete-char
+fishy-bind shift-backspace fishy-backward-delete-char
+fishy-bind ctrl-a fishy-beginning-of-line
+fishy-bind ctrl-e fishy-end-of-line
+fishy-bind ctrl-h fishy-backward-delete-char
+fishy-bind ctrl-p fishy-up-or-search
+fishy-bind ctrl-n fishy-down-or-search
+fishy-bind ctrl-f fishy-forward-char
+fishy-bind ctrl-b fishy-backward-char
+fishy-bind ctrl-t fishy-transpose-chars
+fishy-bind ctrl-g fishy-cancel
+fishy-bind ctrl-/ fishy-undo
+fishy-bind ctrl-_ fishy-undo
+fishy-bind ctrl-z fishy-undo
+fishy-bind ctrl-shift-z fishy-redo
+fishy-bind alt-/ fishy-redo
+fishy-bind alt-t fishy-transpose-words
+fishy-bind alt-u fishy-upcase-word
+fishy-bind alt-c fishy-capitalize-word
+fishy-bind alt-backspace fishy-backward-kill-word
+fishy-bind ctrl-alt-h fishy-backward-kill-word
+fishy-bind ctrl-backspace fishy-backward-kill-token
+fishy-bind alt-delete fishy-kill-word
+fishy-bind ctrl-delete fishy-kill-token
+fishy-bind 'alt-<' fishy-beginning-of-buffer
+fishy-bind 'alt->' fishy-end-of-buffer
+# (ctrl-r history-pager: fishy has no history pager; darin's atuin binds it.)
+
+# The zle keymap only routes bytes (input.zsh): control characters, DEL and
+# ESC go to fish's decoder, printable text to self-insert -- or, for printable
+# keys with a binding of their own, to that binding's widget.
 fishy-keys-install() {
   emulate -L zsh
+  _fishy_binds_compile
   bindkey -N fishy                 # fresh keymap, nothing inherited
-  # Every printable character self-inserts (fish: '' self-insert).
   bindkey -M fishy -R ' '-'~' fishy-self-insert
   bindkey -M fishy -R '\M-^@'-'\M-^?' fishy-self-insert
-  local k
-  for k in ' ' ';' '|' '&' '>' '<' ')'; do bindkey -M fishy "$k" fishy-self-insert-expand; done
+  bindkey -M fishy -R '^@'-'^_' fishy-key
+  bindkey -M fishy '^?' fishy-key
 
-  local -A map=(
-    '^M' execute  '^J' execute
-    '^I' complete  '\e[Z' complete-and-search  '^S' pager-toggle-search
-    '\e' cancel  '^G' cancel
-    '^C' clear-commandline
-    '^?' backward-delete-char  '^H' backward-delete-char  '\e[3~' delete-char  '^D' delete-or-exit
-    '^B' backward-char  '\e[D' backward-char  '\eOD' backward-char
-    '^F' forward-char  '\e[C' forward-char  '\eOC' forward-char
-    '^A' beginning-of-line  '\e[H' beginning-of-line  '\eOH' beginning-of-line  '\e[1~' beginning-of-line
-    '^E' end-of-line  '\e[F' end-of-line  '\eOF' end-of-line  '\e[4~' end-of-line
-    '\e<' beginning-of-buffer  '\e>' end-of-buffer
-    '\e[5~' beginning-of-history  '\e[6~' end-of-history
-    '\e[1;3A' history-token-search-backward  '\e[1;9A' history-token-search-backward
-    '\e[1;3B' history-token-search-forward  '\e[1;9B' history-token-search-forward
-    '\e.' history-token-search-backward
-    '\eb' prevd-or-backward-word  '\e[1;3D' prevd-or-backward-word  '\e[1;9D' prevd-or-backward-word
-    '\ef' nextd-or-forward-word  '\e[1;3C' nextd-or-forward-word  '\e[1;9C' nextd-or-forward-word
-    '\e[1;2D' backward-bigword  '\e[1;2C' forward-bigword
-    '\e[1;5D' backward-token  '\e[1;5C' forward-token
-    '\e^?' backward-kill-word  '\e^H' backward-kill-word
-    '\e[3;3~' kill-word
-    '\e[3;5~' kill-token
-    '^W' backward-kill-path-component
-    '^K' kill-line  '^U' backward-kill-line
-    '^Y' yank  '\ey' yank-pop
-    '^T' transpose-chars  '\et' transpose-words
-    '\eu' upcase-word  '\ec' capitalize-word
-    '^Z' undo  '^_' undo  '\e/' redo
-  )
-  for k in ${(k)map}; do bindkey -M fishy "$k" fishy-$map[$k]; done
-  bindkey -M fishy '\e[A' fishy-up-or-search  '\eOA' fishy-up-or-search  '^P' fishy-up-or-search
-  bindkey -M fishy '\e[B' fishy-down-or-search '\eOB' fishy-down-or-search '^N' fishy-down-or-search
-  bindkey -M fishy '^@' fishy-ctrl-space
-  bindkey -M fishy '\e^M' fishy-newline  '\e^J' fishy-newline
-  bindkey -M fishy '\e[200~' fishy-bracketed-paste
+  # The binding fish picks for an unmodified printable key (find_binding on
+  # that one key event), for each key some binding could match.
+  _fishy_print_bind=()
+  local -A cand
+  local -i i n=${#_fkb_style} m c
+  local k
+  for (( i = 1; i <= n; i++ )); do
+    [[ $_fkb_style[i] == G ]] && continue
+    k=${_fkb_keys[i]%% *}       # the first key
+    m=${k%%:*} c=${k#*:}
+    (( c == _FK_SPACE )) && c=32
+    (( m & ~_FK_SHIFT )) && continue
+    (( c >= 32 && c <= 126 )) && cand[${(#)c}]=1
+    if (( (m & _FK_SHIFT) && c >= 97 && c <= 122 )); then
+      (( c -= 32 ))
+      cand[${(#)c}]=1
+    fi
+  done
+  local ch w
+  for ch in "${(@k)cand}"; do
+    c=$(( #ch ))
+    (( c == 32 )) && c=$_FK_SPACE
+    _fishy_binds_lookup_key $c || continue
+    w=$_fkb_widget[_fb]
+    if (( _fpk_wanted )); then
+      # A longer binding starts with this key: fish's matcher reads on.
+      _fishy_print_bind[$ch]=o
+      bindkey -M fishy -- "$ch" fishy-key
+    elif [[ $_fkb_style[_fb] == G || $w == @self-insert ]]; then
+      continue
+    elif [[ $w == @self-insert-expand ]]; then
+      _fishy_print_bind[$ch]=e
+      bindkey -M fishy -- "$ch" fishy-self-insert-expand
+    else
+      _fishy_print_bind[$ch]=o
+      if [[ $_fkb_keys[_fb] == *' '* || $_fkb_style[_fb] == R ]]; then
+        bindkey -M fishy -- "$ch" fishy-key
+      elif [[ $_fkb_flags[_fb] == *s* ]]; then
+        zle -N fishy-script-$w _fishy_w_script_key
+        bindkey -M fishy -- "$ch" fishy-script-$w
+      else
+        bindkey -M fishy -- "$ch" $w
+      fi
+    fi
+  done
   bindkey -A fishy main
 }

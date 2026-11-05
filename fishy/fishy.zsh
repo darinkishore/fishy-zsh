@@ -6,6 +6,9 @@
 # $FISHY_FISH. See AGENTS.md for the architecture.
 
 [[ -o interactive && -o zle ]] || return 0
+# fishy needs fishy-zsh's patched zsh (zle_display, IMPLICIT_CD, ...). Any other
+# zsh reading the same startup files (/bin/zsh over ssh, say) keeps its own UX.
+[[ -n ${options[implicitcd]-} ]] || return 0
 
 typeset -g FISHY_DIR=${${(%):-%x}:A:h}
 
@@ -22,6 +25,7 @@ source $FISHY_DIR/pager.zsh
 source $FISHY_DIR/complete.zsh
 source $FISHY_DIR/theme.zsh
 source $FISHY_DIR/reader.zsh
+source $FISHY_DIR/input.zsh
 source $FISHY_DIR/keys.zsh
 source $FISHY_DIR/paste.zsh
 source $FISHY_DIR/integrations.zsh
@@ -31,7 +35,7 @@ source $FISHY_DIR/bindings.zsh
 
 # fish's implicit cd (`..`, `dir/`: IMPLICIT_CD, fishy's zsh patch), and fish's
 # cd never prints the directory (zsh's does for cd -, +N and CDPATH hits).
-[[ -n ${options[implicitcd]-} ]] && setopt implicit_cd
+setopt implicit_cd
 setopt cd_silent
 # fish: `#` starts a comment on the command line too (alt-# relies on it).
 setopt interactive_comments
@@ -60,9 +64,6 @@ precmd_functions=(${precmd_functions:#_ghostty_deferred_init})
 # them as XOFF/XON flow control.
 setopt no_flow_control
 
-# fish_escape_delay_ms defaults to 30ms; zsh's KEYTIMEOUT is in 1/100 s.
-KEYTIMEOUT=3
-
 # Shared history: commands run here are added to fish's history (with fish's
 # path detection), so autosuggestions and history search match fish exactly.
 typeset -gi _fishy_history_pending=0
@@ -89,6 +90,7 @@ _fishy_sync_commands() {
 }
 
 _fishy_line_init() {
+  _fishy_protocols_line_init
   (( ${#_fishy_face} )) || fishy-theme-collect
   fishy-reader-line-init
 }
@@ -96,6 +98,7 @@ _fishy_line_init() {
 # fish's final rendering keeps the syntax colors but drops the suggestion and
 # the pager.
 _fishy_line_finish() {
+  _fishy_protocols_line_finish
   _fishy_prompt_line_finish
   fishy-pager-clear
   fishy-suggest-clear
@@ -108,11 +111,15 @@ add-zle-hook-widget line-pre-redraw fishy-render
 add-zle-hook-widget line-finish _fishy_line_finish
 fishy-prompt-install
 
-fishy-keys-install
 fishy-bindings-install
 # darin's fish layers atuin and fzf on top of the defaults; so does fishy
 # (FISHY_INTEGRATIONS=0 keeps stock fish bindings, e.g. for the harness).
 [[ ${FISHY_INTEGRATIONS:-1} == 1 ]] && fishy-integrations-install
+fishy-keys-install
+# fish's keyboard protocols (kitty's, where the terminal has it; input.zsh).
+_fishy_input_read_verase
+_fishy_protocols_init
+zshexit_functions+=(_fishy_protocols_exit)
 
 # ctrl-c while editing: fish binds it to clear-commandline (clear in place, no
 # ^C, no new prompt). zsh delivers it as SIGINT, and a widget run from inside

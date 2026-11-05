@@ -8,14 +8,19 @@
 #   source /path/to/fishy/fishy.zsh    # end of .zshrc
 
 [[ -o interactive && -o zle ]] || return 0
+# fishy needs fishy-zsh's patched zsh (zle_display, IMPLICIT_CD, ...). Any other
+# zsh reading the same startup files (/bin/zsh over ssh, say) keeps its own UX.
+[[ -n ${options[implicitcd]-} ]] || return 0
 
 typeset -g FISHY_DIR=${${(%):-%x}:A:h}
 
 # zsh's own terminal integration (OSC 133 marks, OSC 7) would duplicate fish's,
-# which prompt.zsh writes. zle reads this when its module loads (it probes the
-# terminal then, and reports the cwd), so it must come before anything loads
-# zle: one more reason to source this file first.
-{ eval '.term.extensions+=(-integration)' } 2>/dev/null
+# which prompt.zsh writes; and zsh's terminal probe should ask, as fish does,
+# whether the terminal has kitty's keyboard protocol (input.zsh turns it on).
+# zle reads this when its module loads (it probes the terminal then, and
+# reports the cwd), so it must come before anything loads zle: one more reason
+# to source this file first.
+{ eval '.term.extensions+=(-integration query-modkeys-kitty)' } 2>/dev/null
 (( $+functions[fishy-call] )) || source $FISHY_DIR/bridge.zsh
 _fishy_ensure sync
 _fishy_ensure async

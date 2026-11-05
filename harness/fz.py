@@ -98,45 +98,147 @@ TREE: list[str] = [
     ".dotfile",
 ]
 
-# Physical key -> bytes, as Ghostty sends them in legacy (non-kitty) encoding.
-KEYS: dict[str, bytes] = {
-    "tab": b"\t",
-    "shift-tab": b"\x1b[Z",
-    "enter": b"\r",
-    "escape": b"\x1b",
-    "backspace": b"\x7f",
-    "delete": b"\x1b[3~",
-    "shift-delete": b"\x1b[3;2~",
-    "f1": b"\x1bOP",
-    "up": b"\x1b[A",
-    "down": b"\x1b[B",
-    "right": b"\x1b[C",
-    "left": b"\x1b[D",
-    "home": b"\x1b[H",
-    "end": b"\x1b[F",
-    "page-up": b"\x1b[5~",
-    "page-down": b"\x1b[6~",
-    "ctrl-space": b"\x00",
-    "ctrl-_": b"\x1f",
-    "ctrl-left": b"\x1b[1;5D",
-    "ctrl-right": b"\x1b[1;5C",
-    "shift-left": b"\x1b[1;2D",
-    "shift-right": b"\x1b[1;2C",
-    "alt-up": b"\x1b[1;3A",
-    "alt-down": b"\x1b[1;3B",
-    "alt-left": b"\x1b[1;3D",
-    "alt-right": b"\x1b[1;3C",
-    "alt-enter": b"\x1b\r",
-    "alt-backspace": b"\x1b\x7f",
-    # Ghostty macOS default keybinds (see `ghostty +list-keybinds --default`).
-    "opt-left": b"\x1bb",
-    "opt-right": b"\x1bf",
-    "cmd-left": b"\x01",
-    "cmd-right": b"\x05",
-    "cmd-backspace": b"\x15",
+# ---------------------------------------------------------------- keys
+#
+# A step names a physical key press. Each one is what Ghostty 1.3.1 on macOS
+# makes of it: its legacy bytes (src/input/key_encode.zig legacy() and
+# function_keys.zig), and the event its kitty encoder sees -- the key, the
+# modifiers, the text macOS gives it (none for control characters), the
+# unshifted codepoint. The "alt-" keys are Option-as-Alt (Option not consumed);
+# opt-/cmd- keys are Ghostty's default keybinds, which send fixed bytes.
+# Which encoding a key gets depends on the kitty flags the shell has set
+# (KEY_MODE "terminal"), or is always legacy (KEY_MODE "legacy").
+
+
+@dataclass(frozen=True)
+class Key:
+    legacy: bytes
+    key: str = ""             # kitty functional key, or "" for a text key
+    mods: tuple[str, ...] = ()
+    text: str = ""
+    code: int = 0             # unshifted codepoint (text keys)
+    fixed: bool = False
+
+
+KEY_MODE = os.environ.get("FISHY_KEYS", "terminal")
+
+FUNCTIONAL = {
+    "escape": (27, "u"), "enter": (13, "u"), "tab": (9, "u"), "backspace": (127, "u"),
+    "insert": (2, "~"), "delete": (3, "~"), "left": (1, "D"), "right": (1, "C"),
+    "up": (1, "A"), "down": (1, "B"), "page-up": (5, "~"), "page-down": (6, "~"),
+    "home": (1, "H"), "end": (1, "F"), "f1": (1, "P"), "f2": (1, "Q"), "f3": (13, "~"),
+    "f4": (1, "S"), "f5": (15, "~"), "f6": (17, "~"), "f7": (18, "~"), "f8": (19, "~"),
+    "f9": (20, "~"), "f10": (21, "~"), "f11": (23, "~"), "f12": (24, "~"),
 }
+MOD_BITS = {"shift": 1, "alt": 2, "ctrl": 4, "super": 8}
+# US layout: shifted symbol -> its key.
+SHIFTED = dict(zip('~!@#$%^&*()_+{}|:"<>?', r"`1234567890-=[]\;',./", strict=True))
+
+
+def _is_control(cp: int) -> bool:
+    return cp < 0x20 or cp == 0x7F
+
+
+def kitty_bytes(k: Key, flags: int) -> bytes:
+    """Ghostty's kitty() for a press of k (key_encode.zig)."""
+    if k.fixed:
+        return k.legacy
+    report_all, alternates = flags & 8, flags & 4
+    mods = set(k.mods)
+    # macOS: the modifiers that made the text are consumed (shift; Option too,
+    # but these keys are Option-as-Alt). Control and command never are.
+    effective = mods - {"shift"} if k.text else mods
+    if k.text and k.key in ("enter", "backspace") and not (len(k.text) == 1 and _is_control(ord(k.text))):
+        return b"" if k.key == "backspace" else k.text.encode()
+    if not report_all:
+        if not effective and k.key in ("enter", "tab", "backspace"):
+            return {"enter": b"\r", "tab": b"\t", "backspace": b"\x7f"}[k.key]
+        if k.text and not effective and not any(_is_control(ord(c)) for c in k.text):
+            return k.text.encode()
+    entry = FUNCTIONAL.get(k.key) or ((k.code, "u") if k.code else None)
+    if entry is None:
+        return k.text.encode()
+    code, final = entry
+    m = 1 + sum(MOD_BITS[x] for x in mods)
+    shifted = base = 0
+    if alternates and not _is_control(code) and k.text:
+        cp1 = ord(k.text[0])
+        if cp1 != code and "shift" in mods:
+            shifted = cp1
+        if k.code and k.code != code and cp1 != k.code and len(k.text) == 1:
+            base = k.code
+    if final in "u~":
+        seq = f"\x1b[{code}" + (f":{shifted}" if shifted else "")
+        seq += (f":{base}" if shifted else f"::{base}") if base else ""
+        seq += (f";{m}" if m > 1 else "") + final
+    else:
+        seq = f"\x1b[1;{m}{final}" if m > 1 else f"\x1b[{final}"
+    return seq.encode()
+
+
+def _text_key(ch: str, mods: tuple[str, ...], legacy: bytes) -> Key:
+    """A key that types ch on a US layout (with shift when ch needs it), plus mods."""
+    base = ch.lower() if ch.isupper() else SHIFTED.get(ch, ch)
+    if base != ch and "shift" not in mods:
+        mods = ("shift", *mods)
+    return Key(legacy, mods=mods, text=ch, code=ord(base))
+
+
+KEYS: dict[str, Key] = {
+    "tab": Key(b"\t", "tab"),
+    "shift-tab": Key(b"\x1b[Z", "tab", ("shift",)),
+    "ctrl-tab": Key(b"\x1b[27;5;9~", "tab", ("ctrl",)),
+    "enter": Key(b"\r", "enter"),
+    "shift-enter": Key(b"\x1b[27;2;13~", "enter", ("shift",)),
+    "ctrl-enter": Key(b"\x1b[27;5;13~", "enter", ("ctrl",)),
+    "alt-enter": Key(b"\x1b\r", "enter", ("alt",)),
+    "escape": Key(b"\x1b", "escape"),
+    "backspace": Key(b"\x7f", "backspace", text="\x7f"),
+    "shift-backspace": Key(b"\x7f", "backspace", ("shift",), text="\x7f"),
+    "ctrl-backspace": Key(b"\x08", "backspace", ("ctrl",), text="\x7f"),
+    "alt-backspace": Key(b"\x1b\x7f", "backspace", ("alt",), text="\x7f"),
+    "ctrl-alt-backspace": Key(b"\x1b\x08", "backspace", ("ctrl", "alt"), text="\x7f"),
+    "delete": Key(b"\x1b[3~", "delete"),
+    "shift-delete": Key(b"\x1b[3;2~", "delete", ("shift",)),
+    "alt-delete": Key(b"\x1b[3;3~", "delete", ("alt",)),
+    "ctrl-delete": Key(b"\x1b[3;5~", "delete", ("ctrl",)),
+    "f1": Key(b"\x1bOP", "f1"),
+    "up": Key(b"\x1b[A", "up"),
+    "down": Key(b"\x1b[B", "down"),
+    "right": Key(b"\x1b[C", "right"),
+    "left": Key(b"\x1b[D", "left"),
+    "home": Key(b"\x1b[H", "home"),
+    "end": Key(b"\x1b[F", "end"),
+    "page-up": Key(b"\x1b[5~", "page-up"),
+    "page-down": Key(b"\x1b[6~", "page-down"),
+    "ctrl-left": Key(b"\x1b[1;5D", "left", ("ctrl",)),
+    "ctrl-right": Key(b"\x1b[1;5C", "right", ("ctrl",)),
+    "shift-left": Key(b"\x1b[1;2D", "left", ("shift",)),
+    "shift-right": Key(b"\x1b[1;2C", "right", ("shift",)),
+    "alt-up": Key(b"\x1b[1;3A", "up", ("alt",)),
+    "alt-down": Key(b"\x1b[1;3B", "down", ("alt",)),
+    "alt-left": Key(b"\x1b[1;3D", "left", ("alt",)),
+    "alt-right": Key(b"\x1b[1;3C", "right", ("alt",)),
+    "ctrl-space": Key(b"\x00", mods=("ctrl",), text=" ", code=32),
+    "shift-space": Key(b" ", mods=("shift",), text=" ", code=32),
+    "ctrl-_": _text_key("_", ("ctrl",), b"\x1f"),
+    "ctrl-/": Key(b"\x1f", mods=("ctrl",), text="/", code=47),
+    "ctrl-[": Key(b"\x1b[91;5u", mods=("ctrl",), text="[", code=91),
+    "ctrl-shift-z": _text_key("Z", ("ctrl",), b"\x1b[122;6u"),
+    # Ghostty macOS default keybinds (`ghostty +list-keybinds --default`).
+    "opt-left": Key(b"\x1bb", fixed=True),
+    "opt-right": Key(b"\x1bf", fixed=True),
+    "cmd-left": Key(b"\x01", fixed=True),
+    "cmd-right": Key(b"\x05", fixed=True),
+    "cmd-backspace": Key(b"\x15", fixed=True),
+}
+# ctrl-<letter>: ctrlSeq's table, except i/m (Ghostty sends those as CSI u to
+# tell them from tab and enter).
 for _c in "abcdefghijklmnopqrstuvwxyz":
-    KEYS[f"ctrl-{_c}"] = bytes([ord(_c) - 96])
+    KEYS[f"ctrl-{_c}"] = Key(
+        f"\x1b[{ord(_c)};5u".encode() if _c in "im" else bytes([ord(_c) - 96]),
+        mods=("ctrl",), text=_c, code=ord(_c),
+    )
 
 
 def unescape(text: str) -> bytes:
@@ -148,12 +250,59 @@ def unescape(text: str) -> bytes:
     return re.sub(r"\\(x[0-9a-fA-F]{2}|[nrte\\])", one, text).encode()
 
 
-def key_bytes(step: str) -> bytes:
+def key_for(step: str) -> Key:
     if step in KEYS:
         return KEYS[step]
     if step.startswith("alt-") and len(step) == 5:
-        return b"\x1b" + step[4].encode()
+        return _text_key(step[4], ("alt",), b"\x1b" + step[4].encode())
     raise SystemExit(f"unknown key: {step}")
+
+
+# Ghostty's kitty keyboard flag stacks (terminal/kitty/key.zig FlagStack), one
+# per screen, replayed from the shell's output so far.
+_KITTY_CSI = re.compile(rb"\x1b(?:\[([=><?])([0-9;]*)u|\[\?(1049|1047|47)([hl])|c)")
+
+
+def kitty_flags(name: str) -> int:
+    out = subprocess.run(["termctrl", "logs", "--ansi", name], check=False, capture_output=True).stdout
+    stacks = {False: [0] * 8, True: [0] * 8}
+    idx = {False: 0, True: 0}
+    alt = False
+    for m in _KITTY_CSI.finditer(out):
+        kind, params, mode, hl = m.groups()
+        if mode:
+            alt = hl == b"h"
+            continue
+        if kind is None:  # RIS
+            stacks[alt], idx[alt] = [0] * 8, 0
+            continue
+        nums = [int(x) if x else 0 for x in params.split(b";")] if params else []
+        st, i = stacks[alt], idx[alt]
+        match kind:
+            case b"=":
+                flags, how = (nums + [0])[0], (nums[1:] or [1])[0] or 1
+                st[i] = flags if how == 1 else st[i] | flags if how == 2 else st[i] & ~flags if how == 3 else st[i]
+            case b">":
+                idx[alt] = i = (i + 1) % 8
+                st[i] = (nums + [0])[0]
+            case b"<":
+                n = (nums[0] if nums and nums[0] else 1)
+                if n >= 8:
+                    stacks[alt], idx[alt] = [0] * 8, 0
+                else:
+                    for _ in range(n):
+                        st[i] = 0
+                        i = (i - 1) % 8
+                    idx[alt] = i
+    return stacks[alt][idx[alt]] & 0x1F
+
+
+def key_bytes(step: str, name: str | None = None) -> bytes:
+    k = key_for(step)
+    if KEY_MODE == "legacy" or k.fixed or name is None:
+        return k.legacy
+    flags = kitty_flags(name)
+    return kitty_bytes(k, flags) if flags else k.legacy
 
 
 def termctrl(*args: str, stdin: bytes | None = None, check: bool = True) -> str:
@@ -468,7 +617,7 @@ def send(name: str, step: str) -> None:
     elif step.startswith(("!", ">")):
         data = step[1:].encode() + b"\r"
     else:
-        data = key_bytes(step)
+        data = key_bytes(step, name)
     termctrl("send", name, "--stdin", stdin=data)
 
 

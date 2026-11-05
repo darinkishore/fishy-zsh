@@ -55,7 +55,6 @@ if (( $+commands[atuin] )); then
     out=$(ATUIN_SHELL=zsh ATUIN_QUERY=$BUFFER atuin search "$@" -i 3>&1 1>&2 2>&3 3>&-)
     st=$?
     _fishy_tty_end
-    print -n -- "${zle_bracketed_paste[1]}" >/dev/tty
     if (( st != 0 )); then
       [[ -n $out ]] && print -r -- "$out" >/dev/tty
       return $st
@@ -332,14 +331,15 @@ _fishy_zoxide_install() {
 
 fishy-integrations-install() {
   (( $+functions[__zoxide_z] && $+functions[__zoxide_pwd] )) && _fishy_zoxide_install
+  # In darin's fish these are user bindings (fish code), in this order.
   if (( $+commands[fzf] )); then
-    bindkey -M fishy '^T' fishy-fzf-file
-    bindkey -M fishy '\ec' fishy-fzf-cd
-    bindkey -M fishy '\e[Z' fishy-fzf-complete
+    fishy-bind -u -s ctrl-t fishy-fzf-file
+    fishy-bind -u -s alt-c fishy-fzf-cd
+    fishy-bind -u -s shift-tab fishy-fzf-complete
   fi
   if (( $+commands[atuin] )); then
-    bindkey -M fishy '^R' fishy-atuin-search
-    bindkey -M fishy '\e[A' fishy-atuin-up '\eOA' fishy-atuin-up
-    bindkey -M fishy '?' fishy-atuin-question
+    fishy-bind -u -s ctrl-r fishy-atuin-search
+    fishy-bind -u -s up fishy-atuin-up
+    fishy-bind -u -s '?' fishy-atuin-question
   fi
 }

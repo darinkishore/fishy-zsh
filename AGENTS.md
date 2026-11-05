@@ -10,6 +10,8 @@ fish decision comes from fish itself, via a patched fish running as a server.
   - `bridge.zsh` — two persistent fish servers (coprocs): `sync` (Tab,
     history, word motion, prompt) and `async` (suggestions, highlighting).
   - `reader.zsh` and friends — a zsh port of fish's reader control flow.
+  - `input.zsh` — fish's key input layer (decoder, `find_binding`, keyboard
+    protocols); `keys.zsh` — fish's preset binding table; see "Keys" below.
   - `prompt.zsh` — fish draws the prompt; see "Prompt" below.
   - `server.fish` — the server loop.
 - `functions.zsh` — fish's interactive functions ported line for line
@@ -53,7 +55,9 @@ fish decision comes from fish itself, via a patched fish running as a server.
   `scenarios` (core), `-pure`, `-transient`, `-rprompt`, `-abbr` (abbrs in an
   interactive-only block, as home-manager writes them), `-paste` (`paste:`
   steps send Ghostty's bracketed-paste framing), `-dirs` (ls/ll/la,
-  implicit cd, cd -, prevd/nextd/dirh/cdh, alt-left/right).
+  implicit cd, cd -, prevd/nextd/dirh/cdh, alt-left/right), `-kitty` (keys
+  that differ under kitty's keyboard protocol). `keys.py` / `keymatch.py`:
+  the decoder and the matcher against fish itself (see "Keys").
 - `spec/fish-behavior.md` — 340 source-cited fish behaviors.
 - `try/` — `nix run .#try`: fishy on top of your real zsh config.
 
@@ -66,6 +70,9 @@ fish decision comes from fish itself, via a patched fish running as a server.
     FISHY_DEV_FISH=~/vendor/github.com/fish-shell/fish-4.9.3/target/release/fish \
       uv run harness/fz.py suite                # against a cargo build
     FISHY_LOG=/tmp/fishy.log nix run .#try      # bridge log with per-call ms
+    FISHY_KEYS=legacy uv run harness/fz.py suite  # keys as a legacy terminal sends them
+    uv run --no-project python harness/keys.py      # decoder vs fish_key_reader
+    uv run --no-project python harness/keymatch.py  # find_binding vs fish
 
 Sandboxes live in `/private/tmp/fishy-zsh-sandbox` (`$FISHY_SANDBOX`): outside
 any repository, because prompts run git/jj.
@@ -120,6 +127,35 @@ applied like the reader applies a `commandline` change (whole-line edit,
 pager closed, history search ended, last command reset), inside one undo
 group.
 
+## Keys
+
+fish matches bindings on decoded key events, not bytes, so fishy does too.
+zle's keymap only routes: printable text goes to self-insert (batched like
+read_normal_chars); every control character, DEL and ESC runs `fishy-key`,
+which reads the rest of the sequence with fish's decoder (`decode.rs`: legacy
+bytes, ESC-prefixed alt, CSI/SS3 with xterm modifiers, modifyOtherKeys, kitty
+CSI u with shifted/base-layout keys and text; replies and reports dropped)
+and picks the binding like `find_binding` (user bindings first, then presets
+in `bind` order; exact, modulo-shift and base-layout matches; escape deferred;
+raw escape-sequence bindings; ESC then a key within 30ms is alt). Printable
+keys with a binding of their own are routed by running that same matcher on
+the key at install time. The table is fish's own notation (`fishy-bind KEY
+WIDGET`, `-u` user, `-s` fish code); the harness user bindings (fzf, atuin)
+are registered by integrations.zsh.
+
+Protocols (`tty_handoff.rs`): zsh's terminal probe asks for kitty's protocol
+(`query-modkeys-kitty` in start.zsh); `zle_bracketed_paste` carries fish's
+on/off sequences (bracketed paste + `=5u`, or modifyOtherKeys + DECKPAM, per
+fish's terminal quirks), which zle writes when it starts and stops reading
+a line. Like fish, fish-code bindings (`-s`) run with the protocols off.
+
+Oracles: `keys.py` sends 1112 inputs to `fish_key_reader -cV` and to the
+port (`keydecode.zsh`) and diffs every decoded event; `keymatch.py` rebinds
+every fish preset to insert its index and diffs the binding chosen per input
+(`keymatch.zsh`). The harness encodes each step as Ghostty 1.3.1 on macOS
+does for the kitty flags the shell has set (replayed from its output), or
+always legacy (`FISHY_KEYS=legacy`); both must pass.
+
 ## Prompt
 
 `prompt.zsh` replays fish's prompt lifecycle at the matching zsh hooks:
@@ -170,3 +206,11 @@ Known gaps:
   zsh after.
 - A prompt taller than the screen, and form feeds in prompts, are laid out by
   zsh's rules (fish: visible_prompt_lines / FF as line break).
+- Mouse clicks on the command line (Ghostty's click-to-move: fish's OSC 133
+  `click_events=1` makes it send `CSI < 0;x;y M`) are decoded and dropped;
+  fish moves the cursor there (`mouse_left_click`), fishy does not yet.
+- zle's read timeout counts in 1/100 s: a lone legacy ESC is told from an
+  escape sequence after 10ms (fish: 1ms). Under kitty's protocol ESC is a
+  sequence of its own, so this only matters on legacy terminals.
+- No history pager: ctrl-r does nothing without atuin (darin's atuin binds
+  it).

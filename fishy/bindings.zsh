@@ -595,17 +595,4 @@ fishy-bindings-install() {
   zle -N fishy-clipboard-paste _fishy_w_clipboard_paste
   zle -N fishy-shift-delete _fishy_w_shift_delete
   zle -N fishy-ctrl-l _fishy_w_ctrl_l
-  bindkey -M fishy '\e#' fishy-toggle-comment
-  bindkey -M fishy '\es' fishy-prepend-sudo
-  bindkey -M fishy '\ep' fishy-paginate
-  bindkey -M fishy '\ed' fishy-alt-d
-  bindkey -M fishy '\el' fishy-list-token
-  bindkey -M fishy '\ew' fishy-whatis
-  bindkey -M fishy '\eo' fishy-preview
-  bindkey -M fishy '\eh' fishy-man-page '\eOP' fishy-man-page '\e[11~' fishy-man-page
-  bindkey -M fishy '\ee' fishy-edit-command-buffer '\ev' fishy-edit-command-buffer
-  bindkey -M fishy '^X' fishy-clipboard-copy
-  bindkey -M fishy '^V' fishy-clipboard-paste
-  bindkey -M fishy '\e[3;2~' fishy-shift-delete
-  bindkey -M fishy '^L' fishy-ctrl-l
 }
