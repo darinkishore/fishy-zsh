@@ -1,0 +1,33 @@
+# name<TAB>steps: fish's fish-code bindings (alt-# alt-s alt-d alt-l alt-w
+# alt-o alt-e shift-delete ctrl-l). Clipboard (ctrl-x/ctrl-v) is left out:
+# it would use the real system clipboard.
+
+comment-toggle-run	'=echo hi' alt-#
+comment-toggle-history	'=echo hi' alt-# up
+comment-uncomment	'=echo hi' alt-# alt-#
+comment-uncomment-cursor	'=#echo hi' alt-#
+comment-empty-no-history	alt-#
+sudo-prepend	'=ls -la' alt-s
+sudo-remove	'=ls -la' alt-s alt-s
+sudo-cursor	'=ls -la' left left alt-s
+sudo-empty-uses-history	alt-s
+alt-d-dirh	'!cd projects' alt-d
+alt-d-dirh-empty	alt-d
+alt-d-kill-word	'=echo hello world' home alt-d
+alt-l-dir-token	'=cat Documents/' alt-l
+alt-l-file-token	'=cat Documents/report.md' alt-l
+alt-l-no-token	'=echo ' alt-l
+alt-w-command	'=ls' alt-w
+alt-w-fish-function	'=ll' alt-w
+alt-w-empty	alt-w
+alt-o-preview	'=cat notes.txt' alt-o '=q'
+alt-o-nofile	'=cat missing.txt' alt-o
+alt-e-edit	'!printf "#\041/bin/sh\nprintf \"echo edited\\\\n\" > \"\$1\"\n" > ed.sh' '!cat ed.sh' '!chmod +x ed.sh' '!export EDITOR=$HOME/ed.sh' '=echo original' alt-e
+man-empty	alt-h
+man-unknown	'=nosuchcommandxyz' alt-h
+shift-delete-suggestion	'=git ch' shift-delete
+shift-delete-suggestion-retype	'=git ch' shift-delete backspace '=h'
+shift-delete-backspace	'=echo ab' shift-delete
+shift-delete-hsearch	'=git' up shift-delete
+ctrl-l-clear	'!echo one' '!echo two' ctrl-l
+ctrl-l-with-line	'!echo one' '=echo partial' ctrl-l

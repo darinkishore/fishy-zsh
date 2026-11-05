@@ -56,8 +56,14 @@ _fishy_prompt_first() {
   if (( _fp_ran )); then
     local -i ms=$(( (t1 - _fp_t0) * 1000 ))   # truncated, like as_millis()
     fishy-call sync postexec $st $ms "$_fp_cmd" "${ps[@]}" && _fishy_prompt_out
-    # resolve_pending: the command becomes searchable and is saved.
+  fi
+  # resolve_pending: the line becomes searchable and is saved (the async
+  # server's copy, for suggestions, only in memory). Also for lines zsh runs
+  # no preexec for, e.g. a comment.
+  if (( _fishy_history_pending )); then
     fishy-tell sync history-resolve
+    fishy-tell async history-resolve nosave
+    _fishy_history_pending=0
   fi
   fishy-call sync prompt-event $_fp_first ${COLUMNS:-80} ${LINES:-24} $st "${ps[@]}" \
     && _fishy_prompt_out

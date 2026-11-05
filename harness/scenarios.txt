@@ -17,6 +17,7 @@ suggest-cd-valid	'=cd proj'
 suggest-completion-fallback	'=ls Downlo'
 suggest-cursor-left	'=git ch' left
 suggest-icase	'=GIT CH'
+suggest-after-run	'!echo uniqueword1' '=echo uni'
 
 # --- tab completion and pager
 tab-ambiguous	'=git ch' tab

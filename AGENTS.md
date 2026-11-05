@@ -16,6 +16,12 @@ fish decision comes from fish itself, via a patched fish running as a server.
     (ls ll la, cd with directory history, prevd nextd dirh cdh); colors via
     the server (`__fishy_set_color`), help via fish's `__fish_print_help`.
     pushd/popd/dirs stay zsh's builtins (zsh code passes them zsh flags).
+- `bindings.zsh` — fish's fish-code bindings (alt-# alt-s alt-p alt-d alt-l
+    alt-w alt-o alt-h/f1 alt-e/alt-v ctrl-x ctrl-v shift-delete ctrl-l).
+    Command-line-only ones run fish's own code in the server (`__fishy
+    bind-run`: `commandline` works on zsh's line, `commandline -f` calls are
+    recorded and run by zsh afterwards); terminal ones (man, editor, pager,
+    ls, dirh via `__fish_echo`) are ported and run in zsh.
 - `paste.zsh` — bracketed paste: fish's begin-undo-group / `__fish_paste` /
     end-undo-group sequence; `__fish_paste` itself runs in the server.
 - `nix/` — patches. `fish-fishy-builtin.patch` (the `__fishy` builtin) is
@@ -90,6 +96,18 @@ state belongs to zsh: server.fish erases them (direnv: environment; atuin:
 history records; zoxide: directory scores), or every replayed event would act
 twice. A new tool with fish+zsh hooks must be added there.
 
+## History
+
+The sync server owns the history file (`history-add`, `history-resolve`
+save it). The async server computes autosuggestions from its own History, so
+it gets every command too, in memory only (`history-add ... memory`,
+`history-resolve nosave`): one fish process suggests its own commands. It
+never writes the file. A removal (shift-delete) is saved by the sync server;
+the async server then `forget`s the item and re-reads the file (fish's
+in-memory remove alone would not hide file items, and saving from the async
+server is not allowed: fish's rewrite merges by text, and it holds items it
+must not write).
+
 ## Paste
 
 `__fishy paste` is `share/functions/__fish_paste.fish` line for line (split
@@ -128,7 +146,12 @@ Gotchas:
 - `define-commands` (zsh's ~2000 functions as fish stubs) is sent after the
   prompt request so it never delays the prompt.
 
-Deliberate differences from fish: errors from commands are zsh's
+Harness limit: `!cmd` waits for the cursor row to change, so a scenario
+that scrolls the 30-row screen stalls; keep scenarios to one screen.
+
+Deliberate differences from fish: alt-p appends `|& PAGER` (fish's `&|` is
+"background and disown" in zsh); alt-e's file is `command-line.zsh`;
+errors from commands are zsh's
 (`cd: no such file or directory: x`, `permission denied: ./file`), like
 every other zsh error; titles say `zsh` where fish says `fish`
 (`status current-command` at the prompt); fish's greeting is not printed; a

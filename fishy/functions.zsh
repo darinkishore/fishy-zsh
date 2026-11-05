@@ -93,15 +93,19 @@ ls() {
     fi
   fi
 
+  # fish: isatty stdout (false inside a redirected fish function, as under
+  # __fish_echo: _fishy_stdout_is_tty=0).
+  local -i stdout_tty=0
+  [[ -t 1 ]] && (( ${_fishy_stdout_is_tty:-1} )) && stdout_tty=1
   local -a indicators_opt=()
-  [[ -t 1 ]] && indicators_opt+=($__fish_ls_indicators_opt)
+  (( stdout_tty )) && indicators_opt+=($__fish_ls_indicators_opt)
 
   # Terminal.app sets neither COLORTERM nor CLICOLOR (fish #8309).
   [[ $TERM_PROGRAM == Apple_Terminal ]] && local -x CLICOLOR=1
 
   # An exported CLICOLOR_FORCE colors piped output: drop the color option
   # then. (As in fish, this clears the global for the rest of the session.)
-  [[ ${parameters[CLICOLOR_FORCE]-} == *export* && ! -t 1 ]] && __fish_ls_color_opt=()
+  [[ ${parameters[CLICOLOR_FORCE]-} == *export* ]] && (( ! stdout_tty )) && __fish_ls_color_opt=()
 
   command $__fish_ls_command $__fish_ls_color_opt $indicators_opt "$@"
 }

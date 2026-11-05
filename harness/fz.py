@@ -106,6 +106,8 @@ KEYS: dict[str, bytes] = {
     "escape": b"\x1b",
     "backspace": b"\x7f",
     "delete": b"\x1b[3~",
+    "shift-delete": b"\x1b[3;2~",
+    "f1": b"\x1bOP",
     "up": b"\x1b[A",
     "down": b"\x1b[B",
     "right": b"\x1b[C",

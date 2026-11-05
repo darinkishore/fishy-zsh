@@ -155,7 +155,7 @@ fishy-keys-install() {
     '\e[1;2D' backward-bigword  '\e[1;2C' forward-bigword
     '\e[1;5D' backward-token  '\e[1;5C' forward-token
     '\e^?' backward-kill-word  '\e^H' backward-kill-word
-    '\e[3;3~' kill-word  '\ed' kill-word
+    '\e[3;3~' kill-word
     '\e[3;5~' kill-token
     '^W' backward-kill-path-component
     '^K' kill-line  '^U' backward-kill-line
@@ -163,7 +163,6 @@ fishy-keys-install() {
     '^T' transpose-chars  '\et' transpose-words
     '\eu' upcase-word  '\ec' capitalize-word
     '^Z' undo  '^_' undo  '\e/' redo
-    '^L' clear-screen
   )
   for k in ${(k)map}; do bindkey -M fishy "$k" fishy-$map[$k]; done
   bindkey -M fishy '\e[A' fishy-up-or-search  '\eOA' fishy-up-or-search  '^P' fishy-up-or-search

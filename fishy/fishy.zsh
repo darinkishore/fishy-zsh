@@ -27,11 +27,14 @@ source $FISHY_DIR/paste.zsh
 source $FISHY_DIR/integrations.zsh
 source $FISHY_DIR/prompt.zsh
 source $FISHY_DIR/functions.zsh
+source $FISHY_DIR/bindings.zsh
 
 # fish's implicit cd (`..`, `dir/`: IMPLICIT_CD, fishy's zsh patch), and fish's
 # cd never prints the directory (zsh's does for cd -, +N and CDPATH hits).
 [[ -n ${options[implicitcd]-} ]] && setopt implicit_cd
 setopt cd_silent
+# fish: `#` starts a comment on the command line too (alt-# relies on it).
+setopt interactive_comments
 
 # fishy owns POSTDISPLAY, region_highlight and every widget. Detach the usual
 # plugins that would fight over them if they were loaded before us.
@@ -62,8 +65,14 @@ KEYTIMEOUT=3
 
 # Shared history: commands run here are added to fish's history (with fish's
 # path detection), so autosuggestions and history search match fish exactly.
+typeset -gi _fishy_history_pending=0
 fishy-history-add() {
+  _fishy_history_pending=1
   fishy-call sync history-add "$PWD" "$1"
+  # The async server computes suggestions from its own copy of the history:
+  # one fish process sees its own commands, so it gets them too (in memory;
+  # the sync server writes the file).
+  fishy-tell async history-add "$PWD" "$1" memory
 }
 
 # Commands zsh can run that fish doesn't know (aliases, functions, builtins,
@@ -100,6 +109,7 @@ add-zle-hook-widget line-finish _fishy_line_finish
 fishy-prompt-install
 
 fishy-keys-install
+fishy-bindings-install
 # darin's fish layers atuin and fzf on top of the defaults; so does fishy
 # (FISHY_INTEGRATIONS=0 keeps stock fish bindings, e.g. for the harness).
 [[ ${FISHY_INTEGRATIONS:-1} == 1 ]] && fishy-integrations-install

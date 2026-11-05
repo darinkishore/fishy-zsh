@@ -24,13 +24,30 @@ index 700f44577..6016ca083 100644
  
      if is_interactive_session() && opts.no_config && !opts.no_exec {
 diff --git a/src/builtins/commandline.rs b/src/builtins/commandline.rs
-index bade3b05d..379a78808 100644
+index bade3b05d..f6202e54c 100644
 --- a/src/builtins/commandline.rs
 +++ b/src/builtins/commandline.rs
-@@ -99,6 +99,11 @@ fn replace_part(
+@@ -99,6 +99,28 @@ fn replace_part(
      }
  }
  
++thread_local! {
++    /// fishy: while set, `commandline -f NAME` is recorded here instead of run
++    /// (`__fishy bind-run`: the server has no reader; zsh runs them after).
++    static FISHY_READLINE_CAPTURE: std::cell::RefCell<Option<Vec<WString>>> =
++        const { std::cell::RefCell::new(None) };
++}
++
++/// fishy: start recording `commandline -f` input functions.
++pub(crate) fn fishy_readline_capture_begin() {
++    FISHY_READLINE_CAPTURE.with(|c| *c.borrow_mut() = Some(vec![]));
++}
++
++/// fishy: stop recording; the input functions requested, in order.
++pub(crate) fn fishy_readline_capture_end() -> Vec<WString> {
++    FISHY_READLINE_CAPTURE.with(|c| c.borrow_mut().take()).unwrap_or_default()
++}
++
 +/// fishy: `commandline --insert-smart`'s "$ " stripping, for `__fishy paste`.
 +pub(crate) fn fishy_strip_dollar_prefixes(prefix: &wstr, insert: &wstr) -> Option<WString> {
 +    strip_dollar_prefixes(AppendMode::InsertSmart, prefix, insert)
@@ -39,6 +56,21 @@ index bade3b05d..379a78808 100644
  // Prefix must be at the beginning of a process.
  fn strip_dollar_prefixes(insert_mode: AppendMode, prefix: &wstr, insert: &wstr) -> Option<WString> {
      if insert_mode != AppendMode::InsertSmart {
+@@ -480,6 +502,14 @@ pub fn commandline(
+                 continue;
+             }
+ 
++            // fishy: recording for `__fishy bind-run`?
++            let recorded = FISHY_READLINE_CAPTURE.with(|c| {
++                c.borrow_mut().as_mut().map(|v| v.push((*arg).to_owned())).is_some()
++            });
++            if recorded {
++                continue;
++            }
++
+             // Inserts the readline function at the back of the queue.
+             reader_execute_readline_cmd(parser, CharEvent::from_readline(cmd, vec![]));
+         }
 diff --git a/src/builtins/shared/misc.rs b/src/builtins/shared/misc.rs
 index 39ee74d9e..465303e12 100644
 --- a/src/builtins/shared/misc.rs
@@ -54,6 +86,34 @@ index 39ee74d9e..465303e12 100644
      BuiltinData {
          name: L!("abbr"),
          func: abbr::abbr,
+diff --git a/src/history/history.rs b/src/history/history.rs
+index 47512ea59..3af912b19 100644
+--- a/src/history/history.rs
++++ b/src/history/history.rs
+@@ -1466,6 +1466,23 @@ pub fn incorporate_external_changes(&self) {
+         self.imp().incorporate_external_changes();
+     }
+ 
++    /// fishy: a removal made (and saved) by another fishy server process: drop
++    /// `s` from this session's in-memory items and re-read the file on next
++    /// use. Unlike `remove`, nothing is recorded for a later save: this
++    /// history never writes the file itself.
++    pub fn fishy_forget(&self, s: &wstr) {
++        let mut imp = self.imp();
++        for idx in (0..imp.new_items.len()).rev() {
++            if imp.new_items[idx].str() == s {
++                imp.new_items.remove(idx);
++                if idx < imp.first_unwritten_new_item_index {
++                    imp.first_unwritten_new_item_index -= 1;
++                }
++            }
++        }
++        imp.clear_file_state();
++    }
++
+     /// Gets all the history into a list. This is intended for the $history environment variable.
+     /// This may be long!
+     pub fn get_history(&self) -> Vec<WString> {
 diff --git a/src/reader/reader.rs b/src/reader/reader.rs
 index 87803da12..0115d126c 100644
 --- a/src/reader/reader.rs
@@ -71,10 +131,10 @@ index 87803da12..0115d126c 100644
      use super::{combine_command_and_autosuggestion, completion_apply_to_command_line};
 diff --git a/src/reader/reader/fishy.rs b/src/reader/reader/fishy.rs
 new file mode 100644
-index 000000000..f6746a03d
+index 000000000..b21560f6e
 --- /dev/null
 +++ b/src/reader/reader/fishy.rs
-@@ -0,0 +1,1711 @@
+@@ -0,0 +1,1789 @@
 +//! `__fishy`: headless access to the reader's completion, autosuggestion, word
 +//! motion and history logic, so another line editor (zsh, via fishy-zsh) can
 +//! reproduce fish's interactive behavior exactly instead of approximating it.
@@ -349,7 +409,10 @@ index 000000000..f6746a03d
 +}
 +
 +/// Mirrors Reader::add_to_history (minus the reader-only silent mode).
-+fn do_history_add(parser: &mut Parser, text: &wstr) {
++/// `memory`: the async server's copy of the shared history (its suggestions
++/// must see this session's commands, as one fish process would); the sync
++/// server alone writes the file.
++fn do_history_add(parser: &mut Parser, text: &wstr, memory: bool) {
 +    let mut text = text.to_owned();
 +    // Historical behavior is to trim trailing spaces, unless escaped (#7661).
 +    while text
@@ -375,7 +438,7 @@ index 000000000..f6746a03d
 +    };
 +    let mode = if !should_add {
 +        PersistenceMode::Ephemeral
-+    } else if in_private_mode(parser.vars()) {
++    } else if in_private_mode(parser.vars()) || memory {
 +        PersistenceMode::Memory
 +    } else {
 +        PersistenceMode::Disk
@@ -751,12 +814,15 @@ index 000000000..f6746a03d
 +            let (Some(_cwd), Some(text)) = (arg(2), arg(3)) else {
 +                return bad;
 +            };
-+            do_history_add(parser, text);
++            do_history_add(parser, text, arg(4).is_some_and(|m| m == "memory"));
 +        }
 +        Some("history-resolve") => {
++            // [nosave]: the async server's in-memory copy.
 +            let hist = history(parser);
 +            hist.resolve_pending();
-+            hist.save();
++            if arg(2).is_none_or(|m| m != "nosave") {
++                hist.save();
++            }
 +        }
 +        Some("hsearch-reset") => {
 +            let (Some(mode), Some(off), Some(text)) =
@@ -795,6 +861,39 @@ index 000000000..f6746a03d
 +                }
 +            });
 +            hsearch_report(streams, found);
++        }
++        Some("hsearch-delete") => {
++            // history-delete during a history search (reader.rs HistoryDelete):
++            // remove the current result from the history, save, and move on
++            // (handle_deletion). Replies like hsearch-move.
++            let hist = history(parser);
++            let found = HSEARCH.with_borrow_mut(|hs| {
++                if !hs.active() || hs.is_at_present() {
++                    return false;
++                }
++                hist.remove(hs.current_result());
++                hist.save();
++                hs.handle_deletion();
++                true
++            });
++            hsearch_report(streams, found);
++        }
++        Some("history-remove") => {
++            // history-delete on an autosuggestion: remove that history item, save.
++            // [forget]: the async server's copy, which never writes the file:
++            // the sync server removed and saved; drop the item from memory and
++            // re-read the file (a save here would rewrite the file, dropping
++            // on-disk items that duplicate its in-memory-only ones).
++            let Some(text) = arg(2) else {
++                return bad;
++            };
++            let hist = history(parser);
++            if arg(3).is_some_and(|m| m == "forget") {
++                hist.fishy_forget(text);
++            } else {
++                hist.remove(text);
++                hist.save();
++            }
 +        }
 +        Some("hsearch-end") => {
 +            HSEARCH.with_borrow_mut(|hs| hs.reset());
@@ -1049,6 +1148,45 @@ index 000000000..f6746a03d
 +                    with.truncate(with.len() - 1);
 +                }
 +                record(streams, &[L!("K"), &with, &next.description]);
++            }
++        }
++        Some("bind-run") => {
++            // CURSOR LINE CODE: run a binding's fish code (e.g. a share/functions
++            // function) against zsh's command line, as eval_bind_cmd would.
++            //   O bytes          what it wrote (stdout and stderr)
++            //   B line cursor    the command line afterwards, if it changed
++            //   F name           each `commandline -f NAME`, in order (for zsh
++            //                    to run after applying B; fish runs them inline)
++            let (Some(cur), Some(line), Some(code)) =
++                (arg(2).and_then(parse_usize), arg(3), arg(4))
++            else {
++                return bad;
++            };
++            let cur = cur.min(line.len());
++            {
++                let mut st = commandline_state_snapshot();
++                *st = CommandlineState::new();
++                st.text = line.to_owned();
++                st.cursor_pos = cur;
++            }
++            let last_statuses = parser.vars().last_statuses();
++            // `commandline` works only once the reader would have initialized.
++            let was_initialized = parser.interactive_initialized;
++            parser.interactive_initialized = true;
++            crate::builtins::commandline::fishy_readline_capture_begin();
++            let ((), out) = capture_fds(|| {
++                let _ = parser.eval(code, &crate::io::IoChain::new());
++            });
++            let functions = crate::builtins::commandline::fishy_readline_capture_end();
++            parser.interactive_initialized = was_initialized;
++            parser.set_last_statuses(last_statuses);
++            let st = commandline_state_snapshot().clone();
++            record(streams, &[L!("O"), &bytes_field(&out)]);
++            if st.text != line || st.cursor_pos != cur {
++                record(streams, &[L!("B"), &st.text, &num(st.cursor_pos)]);
++            }
++            for f in &functions {
++                record(streams, &[L!("F"), f]);
 +            }
 +        }
 +        Some("paste") => {
