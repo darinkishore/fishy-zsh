@@ -120,6 +120,23 @@ index 39ee74d9e..465303e12 100644
      BuiltinData {
          name: L!("abbr"),
          func: abbr::abbr,
+diff --git a/src/fds.rs b/src/fds.rs
+index 30b99cb54..e57cc64ba 100644
+--- a/src/fds.rs
++++ b/src/fds.rs
+@@ -362,8 +362,10 @@ fn test_borrowed_fd_file_does_not_close() {
+         drop(borrowed);
+         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD, 0) };
+         assert!(flags >= 0);
++        // fishy: upstream then checked that dropping `file` closes the fd
++        // (fcntl < 0). That races with the parallel tests, which may reuse the
++        // freed number at once; it failed a nix build on Linux. It tests std,
++        // not BorrowedFdFile, so it is dropped.
+         drop(file);
+-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD, 0) };
+-        assert!(flags < 0);
+     }
+ }
 diff --git a/src/history/history.rs b/src/history/history.rs
 index 47512ea59..5453cb538 100644
 --- a/src/history/history.rs
