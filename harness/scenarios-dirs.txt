@@ -1,0 +1,37 @@
+#! config pure
+# name<TAB>steps: fish's ls/ll/la, implicit cd, directory history (cd -,
+# prevd/nextd, dirh, cdh, alt-left/right on an empty line).
+
+ls-plain	'!ls'
+ls-dir	'!ls projects'
+ls-pipe	'!ls | cat'
+ll-fixed	'!ll -d /usr'
+la-fixed	'!la -d /usr'
+icd-dotdot	'!cd projects/alpha' '!..'
+icd-trailing-slash	'!projects/'
+icd-dot-slash	'!./projects'
+icd-dotdot-slash	'!cd projects' '!../Documents'
+icd-absolute	'!/usr'
+icd-tilde	'!cd projects' '!~/'
+icd-history	'!projects/' '!alpha/' '!dirh'
+cd-history	'!cd projects' '!cd alpha' '!dirh'
+cd-dash	'!cd projects' '!cd -'
+cd-dash-twice	'!cd projects' '!cd -' '!cd -'
+cd-dash-empty	'!cd -'
+cd-same-dir	'!cd .' '!dirh'
+prevd-nextd	'!cd projects' '!cd alpha' '!prevd' '!prevd' '!nextd' '!dirh'
+prevd-count	'!cd projects' '!cd alpha' '!cd src' '!prevd 2' '!dirh'
+prevd-list	'!cd projects' '!prevd -l'
+prevd-bad-count	'!prevd abc'
+prevd-unknown-opt	'!prevd -x'
+prevd-too-many	'!prevd 1 2'
+dirh-args	'!dirh x'
+alt-left	'!cd projects' alt-left
+alt-left-right	'!cd projects' alt-left alt-right
+opt-left-empty	'!cd projects' opt-left
+alt-left-nonempty	'!cd projects' '=echo hi' alt-left
+alt-left-empty-hist	alt-left
+cdh-menu	'!cd projects' '!cd alpha' '>cdh'
+cdh-pick-letter	'!cd projects' '!cd alpha' '>cdh' '=a' enter
+cdh-pick-number	'!cd projects' '!cd alpha' '>cdh' '=2' enter
+cdh-empty	'!cdh'

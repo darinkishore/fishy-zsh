@@ -45,6 +45,16 @@ function __fishy_set_env
     end
 end
 
+# set_color with the value of the named color variable (or --reset), for
+# fish's functions that fishy runs in zsh (dirh, cdh).
+function __fishy_set_color
+    if builtin test "$argv[1]" = --reset
+        builtin set_color --reset
+    else
+        builtin set_color $$argv[1] 2>/dev/null
+    end
+end
+
 builtin __fishy serve-init
 
 # Shell state belongs to zsh. The config above ran as interactive fish's does

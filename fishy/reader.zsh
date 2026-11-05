@@ -711,7 +711,11 @@ _fishy_cmd_clear-screen() {
   zle .clear-screen
 }
 
-_fishy_cmd_repaint() { zle .reset-prompt }
+# fish: repaint re-runs the prompt (exec_prompt), then redraws.
+_fishy_cmd_repaint() {
+  _fishy_prompt_render 0
+  zle .reset-prompt
+}
 
 # fish: Reader::handle_execute
 _fishy_cmd_execute() {
@@ -796,8 +800,8 @@ _fishy_syntax_status() {
 
 # Directory history (prevd/nextd) on alt-left/right with an empty line.
 _fishy_dirhist() {
-  # Implemented in dirhist.zsh (fish's dirprev/dirnext semantics).
-  (( $+functions[fishy-dirhist] )) && fishy-dirhist $1
+  # functions.zsh (fish's prevd/nextd).
+  fishy-dirhist $1
 }
 
 # ---------------------------------------------------------------- rendering

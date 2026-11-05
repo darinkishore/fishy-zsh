@@ -68,6 +68,13 @@
             # ZLE_RPROMPT_INDENT=0: the right prompt may touch the text, as
             # fish's fit rule allows (prompt + line + right prompt <= width).
             ./nix/zsh-rprompt-indent0.patch
+            # IMPLICIT_CD: fish's implicit cd (path-like command naming a
+            # directory runs `cd -- dir`, through the cd function).
+            ./nix/zsh-implicit-cd.patch
+            # A function wrapping a builtin of its own name (fishy's cd):
+            # the builtin's errors read as at top level ("cd: ...", not
+            # "cd:cd:22: ...").
+            ./nix/zsh-wrapped-builtin-errors.patch
           ];
         # yodl renders the docs; col (util-linux) is needed for run-help files.
         nativeBuildInputs = old.nativeBuildInputs ++ [yodl pkgs.unixtools.col];

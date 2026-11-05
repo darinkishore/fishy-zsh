@@ -1,0 +1,103 @@
+diff --git a/Doc/Zsh/options.yo b/Doc/Zsh/options.yo
+index fb6fdac91..2a579ada4 100644
+--- a/Doc/Zsh/options.yo
++++ b/Doc/Zsh/options.yo
+@@ -71,6 +71,21 @@ i.e. if commands are being read from standard input.  The option
+ is designed for interactive use; it is recommended that tt(cd)
+ be used explicitly in scripts to avoid ambiguity.
+ )
++pindex(IMPLICIT_CD)
++pindex(NO_IMPLICIT_CD)
++pindex(IMPLICITCD)
++pindex(NOIMPLICITCD)
++cindex(cd, implicit)
++item(tt(IMPLICIT_CD))(
++If a simple command with no arguments, no redirections and no
++tt(command), tt(builtin) or tt(exec) precommand modifier can't be
++executed as a normal command, looks like a path (it starts with
++`tt(/)', `tt(./)' or `tt(../)', ends with `tt(/)', or is `tt(..)') and
++names a directory, run `tt(cd -)tt(-) var(dir)': through a shell
++function named tt(cd) if there is one, otherwise the builtin.  These are
++the rules of the implicit cd of the fish shell.  Unlike tt(AUTO_CD) it
++does not need tt(SHIN_STDIN).
++)
+ pindex(AUTO_PUSHD)
+ pindex(NO_AUTO_PUSHD)
+ pindex(AUTOPUSHD)
+diff --git a/Src/exec.c b/Src/exec.c
+index b0794abab..60daada1d 100644
+--- a/Src/exec.c
++++ b/Src/exec.c
+@@ -3690,6 +3690,29 @@ execcmd_exec(Estate state, Execcmd_params eparams,
+ 	    if ((hn = builtintab->getnode(builtintab, "cd")))
+ 		is_builtin = 1;
+ 	}
++	/*
++	 * IMPLICIT_CD: fish's implicit cd, through a cd function if any.
++	 * No precommand modifier: the last one is in cflags, earlier ones
++	 * in orig_cflags.
++	 */
++	if (!hn && isset(IMPLICITCD) && (!redir || empty(redir)) &&
++	    args && !empty(args) && !nextnode(firstnode(args)) &&
++	    !((cflags | orig_cflags) & (BINF_COMMAND | BINF_BUILTIN | BINF_EXEC)) &&
++	    implicitcdpath((char *) peekfirst(args))) {
++	    /* cancd only decides; cd itself resolves (and reports) the path */
++	    int odoprintdir = doprintdir;
++	    char *dir = cancd(peekfirst(args));
++
++	    doprintdir = odoprintdir;
++	    if (dir) {
++		pushnode(args, dupstring("--"));
++		pushnode(args, dupstring("cd"));
++		if ((hn = shfunctab->getnode(shfunctab, "cd")))
++		    is_shfunc = 1;
++		else if ((hn = builtintab->getnode(builtintab, "cd")))
++		    is_builtin = 1;
++	    }
++	}
+     }
+ 
+     /* This is nonzero if the command is a current shell procedure? */
+@@ -6438,6 +6461,18 @@ stripkshdef(Eprog prog, char *name)
+     }
+ }
+ 
++/* IMPLICIT_CD: does the command look like a path (fish's rules)? */
++
++/**/
++static int
++implicitcdpath(char *s)
++{
++    size_t l = strlen(s);
++
++    return *s == '/' || strpfx("./", s) || strpfx("../", s) ||
++	(l && s[l - 1] == '/') || !strcmp(s, "..");
++}
++
+ /* check to see if AUTOCD applies here */
+ 
+ /**/
+diff --git a/Src/options.c b/Src/options.c
+index 2bd3ed624..8d32b01b1 100644
+--- a/Src/options.c
++++ b/Src/options.c
+@@ -171,6 +171,7 @@ static struct optname optns[] = {
+ {{NULL, "ignorebraces",	      OPT_EMULATE|OPT_SH},	 IGNOREBRACES},
+ {{NULL, "ignoreclosebraces",  OPT_EMULATE},		 IGNORECLOSEBRACES},
+ {{NULL, "ignoreeof",	      0},			 IGNOREEOF},
++{{NULL, "implicitcd",	      0},			 IMPLICITCD},
+ {{NULL, "incappendhistory",   0},			 INCAPPENDHISTORY},
+ {{NULL, "incappendhistorytime",   0},			 INCAPPENDHISTORYTIME},
+ {{NULL, "interactive",	      OPT_SPECIAL},		 INTERACTIVE},
+diff --git a/Src/zsh.h b/Src/zsh.h
+index 6b7449d7c..14cf0f3b2 100644
+--- a/Src/zsh.h
++++ b/Src/zsh.h
+@@ -2457,6 +2457,7 @@ enum {
+     IGNOREBRACES,
+     IGNORECLOSEBRACES,
+     IGNOREEOF,
++    IMPLICITCD,
+     INCAPPENDHISTORY,
+     INCAPPENDHISTORYTIME,
+     INTERACTIVE,

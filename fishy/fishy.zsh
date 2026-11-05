@@ -26,6 +26,12 @@ source $FISHY_DIR/keys.zsh
 source $FISHY_DIR/paste.zsh
 source $FISHY_DIR/integrations.zsh
 source $FISHY_DIR/prompt.zsh
+source $FISHY_DIR/functions.zsh
+
+# fish's implicit cd (`..`, `dir/`: IMPLICIT_CD, fishy's zsh patch), and fish's
+# cd never prints the directory (zsh's does for cd -, +N and CDPATH hits).
+[[ -n ${options[implicitcd]-} ]] && setopt implicit_cd
+setopt cd_silent
 
 # fishy owns POSTDISPLAY, region_highlight and every widget. Detach the usual
 # plugins that would fight over them if they were loaded before us.

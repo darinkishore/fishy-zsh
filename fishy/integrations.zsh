@@ -8,6 +8,8 @@
 #   ctrl-t     fzf-file-widget (fish version: token-aware root and query)
 #   alt-c      fzf-cd-widget (fish version)
 #   shift-tab  fzf_complete (fish completions in fzf; complete-and-search in pager)
+#   z, zi      zoxide's fish functions: jumps go through fish's cd (directory
+#              history), `z -` is fish's cd - (prevd/nextd)
 
 # ---------------------------------------------------------------- helpers
 
@@ -302,7 +304,34 @@ if (( $+commands[fzf] )); then
 fi
 
 # Bind on top of fish's defaults, exactly where darin's fish binds them.
+# ---------------------------------------------------------------- zoxide
+
+# `zoxide init fish`: __zoxide_cd is a copy of fish's cd.fish (so z records
+# directory history) and __zoxide_z is fish's. zsh's init calls the builtin cd
+# and handles `-` as $OLDPWD; these replace its two functions.
+_fishy_zoxide_install() {
+  __zoxide_cd() { cd "$@" }
+
+  __zoxide_z() {
+    local -i argc=$#
+    if (( argc == 0 )); then
+      __zoxide_cd $HOME
+    elif [[ "$*" == - ]]; then
+      __zoxide_cd -
+    elif (( argc == 1 )) && [[ -d $1 ]]; then
+      __zoxide_cd $1
+    elif (( argc == 2 )) && [[ $1 == -- ]]; then
+      __zoxide_cd -- $2
+    else
+      local result
+      result=$(command zoxide query --exclude "$(__zoxide_pwd)" -- "$@") \
+        && __zoxide_cd $result
+    fi
+  }
+}
+
 fishy-integrations-install() {
+  (( $+functions[__zoxide_z] && $+functions[__zoxide_pwd] )) && _fishy_zoxide_install
   if (( $+commands[fzf] )); then
     bindkey -M fishy '^T' fishy-fzf-file
     bindkey -M fishy '\ec' fishy-fzf-cd

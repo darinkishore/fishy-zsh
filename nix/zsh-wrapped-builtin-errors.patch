@@ -1,0 +1,88 @@
+diff --git a/Src/exec.c b/Src/exec.c
+index 60daada1d..b8c1deb1e 100644
+--- a/Src/exec.c
++++ b/Src/exec.c
+@@ -249,6 +249,14 @@ struct execstack *exstack;
+ /**/
+ mod_export Funcstack funcstack;
+ 
++/*
++ * locallevel of a function running `builtin NAME` for its own NAME (-1:
++ * none): messages at that level are reported as from the top level.
++ */
++
++/**/
++mod_export int wrapped_builtin_level = -1;
++
+ #define execerr()				\
+     do {					\
+ 	if (!forked) {				\
+@@ -4318,7 +4326,20 @@ execcmd_exec(Estate state, Execcmd_params eparams,
+ 		}
+ 		dont_queue_signals();
+ 		if (!errflag) {
+-		    int ret = execbuiltin(args, assigns, (Builtin) hn);
++		    /*
++		     * A function wrapping a builtin of its own name (e.g.
++		     * cd() { ...; builtin cd "$@" }): the builtin's errors
++		     * read as if it had been called directly.
++		     */
++		    int owrapped = wrapped_builtin_level;
++		    int ret;
++
++		    if (((cflags | orig_cflags) & BINF_BUILTIN) && funcstack &&
++			funcstack->tp == FS_FUNC &&
++			!strcmp(funcstack->name, hn->nam))
++			wrapped_builtin_level = locallevel;
++		    ret = execbuiltin(args, assigns, (Builtin) hn);
++		    wrapped_builtin_level = owrapped;
+ 		    /*
+ 		     * In case of interruption assume builtin status
+ 		     * is less useful than what interrupt set.
+diff --git a/Src/utils.c b/Src/utils.c
+index 372d2a828..df2be433a 100644
+--- a/Src/utils.c
++++ b/Src/utils.c
+@@ -138,6 +138,15 @@ set_widearray(char *mb_array, Widechar_array wca)
+    is not in the middle of a metafy pair (%s) or a multibyte character.
+  */
+ 
++/* Report a message as from the top level (no script/function name, no line)? */
++
++static int
++toplevelmsg(void)
++{
++    return isset(SHINSTDIN) &&
++	(!locallevel || locallevel == wrapped_builtin_level);
++}
++
+ static void
+ zwarning(const char *cmd, const char *fmt, va_list ap)
+ {
+@@ -147,7 +156,7 @@ zwarning(const char *cmd, const char *fmt, va_list ap)
+     char *prefix = scriptname ? scriptname : (argzero ? argzero : "");
+ 
+     if (cmd) {
+-	if (unset(SHINSTDIN) || locallevel) {
++	if (!toplevelmsg()) {
+ 	    nicezputs(prefix, stderr);
+ 	    fputc((unsigned char)':', stderr);
+ 	}
+@@ -160,7 +169,7 @@ zwarning(const char *cmd, const char *fmt, va_list ap)
+ 	 * program/script is running.  It's also set in shell functions,
+ 	 * so test locallevel, too.
+ 	 */
+-	nicezputs((isset(SHINSTDIN) && !locallevel) ? "zsh" : prefix, stderr);
++	nicezputs(toplevelmsg() ? "zsh" : prefix, stderr);
+ 	fputc((unsigned char)':', stderr);
+     }
+ 
+@@ -298,7 +307,7 @@ zerrmsg(FILE *file, const char *fmt, va_list ap)
+ #endif
+     char *errmsg;
+ 
+-    if ((unset(SHINSTDIN) || locallevel) && lineno) {
++    if (!toplevelmsg() && lineno) {
+ #if defined(ZLONG_IS_LONG_LONG) && defined(PRINTF_HAS_LLD)
+ 	fprintf(file, "%lld: ", lineno);
+ #else

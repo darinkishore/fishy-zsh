@@ -12,6 +12,10 @@ fish decision comes from fish itself, via a patched fish running as a server.
   - `reader.zsh` and friends — a zsh port of fish's reader control flow.
   - `prompt.zsh` — fish draws the prompt; see "Prompt" below.
   - `server.fish` — the server loop.
+- `functions.zsh` — fish's interactive functions ported line for line
+    (ls ll la, cd with directory history, prevd nextd dirh cdh); colors via
+    the server (`__fishy_set_color`), help via fish's `__fish_print_help`.
+    pushd/popd/dirs stay zsh's builtins (zsh code passes them zsh flags).
 - `paste.zsh` — bracketed paste: fish's begin-undo-group / `__fish_paste` /
     end-undo-group sequence; `__fish_paste` itself runs in the server.
 - `nix/` — patches. `fish-fishy-builtin.patch` (the `__fishy` builtin) is
@@ -27,6 +31,13 @@ fish decision comes from fish itself, via a patched fish running as a server.
     `COLORTERM=truecolor`. Upstreamable.
   - `zsh-rprompt-indent0.patch` — with `ZLE_RPROMPT_INDENT=0` the right prompt
     may touch the text (fish's fit rule).
+  - `zsh-implicit-cd.patch` — `IMPLICIT_CD` option: fish's implicit cd (no
+    args/redirections/precommand modifier, command not found, path-like
+    `/` `./` `../` `x/` `..`, a directory) runs `cd -- dir` via the cd
+    function. zsh's `AUTO_CD` takes any directory name and the cd builtin.
+  - `zsh-wrapped-builtin-errors.patch` — a function wrapping a builtin of its
+    own name (`cd() { ...builtin cd }`) gets the builtin's errors as at top
+    level (`cd: ...`, not `cd:cd:22: ...`); hooks run inside keep theirs.
   Regenerate a patch after committing on its branch; nix only sees files jj
   has snapshotted (run `jj st` before `nix build`).
 - `harness/` — `fz.py`: fish and zsh side by side in termctrl (Ghostty's
@@ -35,7 +46,8 @@ fish decision comes from fish itself, via a patched fish running as a server.
   (`harness/configs/NAME`; default: the neutral `fish-config.fish`). Suites:
   `scenarios` (core), `-pure`, `-transient`, `-rprompt`, `-abbr` (abbrs in an
   interactive-only block, as home-manager writes them), `-paste` (`paste:`
-  steps send Ghostty's bracketed-paste framing).
+  steps send Ghostty's bracketed-paste framing), `-dirs` (ls/ll/la,
+  implicit cd, cd -, prevd/nextd/dirh/cdh, alt-left/right).
 - `spec/fish-behavior.md` — 340 source-cited fish behaviors.
 - `try/` — `nix run .#try`: fishy on top of your real zsh config.
 
@@ -116,7 +128,9 @@ Gotchas:
 - `define-commands` (zsh's ~2000 functions as fish stubs) is sent after the
   prompt request so it never delays the prompt.
 
-Deliberate differences from fish: titles say `zsh` where fish says `fish`
+Deliberate differences from fish: errors from commands are zsh's
+(`cd: no such file or directory: x`, `permission denied: ./file`), like
+every other zsh error; titles say `zsh` where fish says `fish`
 (`status current-command` at the prompt); fish's greeting is not printed; a
 paste into an unmatched single quote is spelled `'\''` (same literal text as
 fish's `\'`); a raw ESC inside a paste is dropped like other control
