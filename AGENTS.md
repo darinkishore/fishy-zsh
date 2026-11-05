@@ -12,6 +12,8 @@ fish decision comes from fish itself, via a patched fish running as a server.
   - `reader.zsh` and friends — a zsh port of fish's reader control flow.
   - `prompt.zsh` — fish draws the prompt; see "Prompt" below.
   - `server.fish` — the server loop.
+- `paste.zsh` — bracketed paste: fish's begin-undo-group / `__fish_paste` /
+    end-undo-group sequence; `__fish_paste` itself runs in the server.
 - `nix/` — patches. `fish-fishy-builtin.patch` (the `__fishy` builtin) is
   `git diff 4.9.3 HEAD` of branch `fishy-4.9.3` in
   `~/vendor/github.com/fish-shell/fish-4.9.3`. The `zsh-*.patch` files are
@@ -30,7 +32,10 @@ fish decision comes from fish itself, via a patched fish running as a server.
 - `harness/` — `fz.py`: fish and zsh side by side in termctrl (Ghostty's
   terminal core, Ghostty's exact environment), screens diffed cell by cell.
   Scenario files (`scenarios*.txt`) pick a fish config with `#! config NAME`
-  (`harness/configs/NAME`; default: the neutral `fish-config.fish`).
+  (`harness/configs/NAME`; default: the neutral `fish-config.fish`). Suites:
+  `scenarios` (core), `-pure`, `-transient`, `-rprompt`, `-abbr` (abbrs in an
+  interactive-only block, as home-manager writes them), `-paste` (`paste:`
+  steps send Ghostty's bracketed-paste framing).
 - `spec/fish-behavior.md` — 340 source-cited fish behaviors.
 - `try/` — `nix run .#try`: fishy on top of your real zsh config.
 
@@ -56,6 +61,34 @@ change) write into it. The server's fds 1/2 go to /dev/null; the prompt
 subcommands capture them (a scratch file dup2'd over 1 and 2), because fish
 writes event output and titles straight to those fds. The coproc is started
 with `no_multios`: otherwise zsh tees stdout instead of redirecting it.
+
+## Server config
+
+The server is a non-interactive fish, but it loads the user's config as an
+interactive fish does: `__fishy_interactive_config=1` (bridge.zsh) makes
+`status is-interactive` true while fish's init files run (patch in
+`src/bin/fish.rs`, scoped to `read_init`; the server never owns the
+terminal). So `status is-interactive; and begin ... end` blocks (where
+home-manager puts abbreviations, zoxide, fzf, atuin) define the same
+abbreviations, functions and completions as in interactive fish (checked:
+abbr/functions/complete/variables/handlers identical to `fish -i`).
+
+That block also installs the fish hooks of tools that hook zsh too. Shell
+state belongs to zsh: server.fish erases them (direnv: environment; atuin:
+history records; zoxide: directory scores), or every replayed event would act
+twice. A new tool with fish+zsh hooks must be added there.
+
+## Paste
+
+`__fishy paste` is `share/functions/__fish_paste.fish` line for line (split
+on \r and \n, drop ASCII control characters, search field, current-token
+quote state, leading-whitespace trims, `$ ` stripping via `--insert-smart`,
+root check), with zsh's quoting: `__fish_tokenizer_state` knows zsh's
+literal single quotes and `$'...'`, and a paste into an unmatched `'...`
+escapes `'` as `'\''` (fish's `\'` would close a zsh quote). The edit is
+applied like the reader applies a `commandline` change (whole-line edit,
+pager closed, history search ended, last command reset), inside one undo
+group.
 
 ## Prompt
 
@@ -84,7 +117,12 @@ Gotchas:
   prompt request so it never delays the prompt.
 
 Deliberate differences from fish: titles say `zsh` where fish says `fish`
-(`status current-command` at the prompt); fish's greeting is not printed.
+(`status current-command` at the prompt); fish's greeting is not printed; a
+paste into an unmatched single quote is spelled `'\''` (same literal text as
+fish's `\'`); a raw ESC inside a paste is dropped like other control
+characters, whereas fish's decoder runs the escape sequence as a key binding
+(ESC b inside a paste would move a word back), which is what bracketed paste
+exists to prevent.
 
 Known gaps:
 - Prompt functions that inspect `jobs` see the server's jobs (none).

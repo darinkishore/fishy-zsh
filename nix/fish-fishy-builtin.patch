@@ -1,3 +1,44 @@
+diff --git a/src/bin/fish.rs b/src/bin/fish.rs
+index 700f44577..6016ca083 100644
+--- a/src/bin/fish.rs
++++ b/src/bin/fish.rs
+@@ -481,7 +481,20 @@ fn throwing_main() -> i32 {
+     parser.set_syncs_uvars(!opts.no_config);
+ 
+     if !opts.no_exec && !opts.no_config {
++        // fishy: a fishy server loads the user's config exactly as an interactive
++        // fish does (`status is-interactive` is true while it runs), so the
++        // definitions in interactive-only blocks (abbreviations, functions,
++        // completions) exist in the server. The flag is scoped to the config:
++        // the server itself stays non-interactive (no terminal ownership).
++        let fishy_config =
++            !is_interactive_session() && std::env::var_os("__fishy_interactive_config").is_some();
++        if fishy_config {
++            set_interactive_session(true);
++        }
+         read_init(parser, config_paths.as_ref().unwrap());
++        if fishy_config {
++            set_interactive_session(false);
++        }
+     }
+ 
+     if is_interactive_session() && opts.no_config && !opts.no_exec {
+diff --git a/src/builtins/commandline.rs b/src/builtins/commandline.rs
+index bade3b05d..379a78808 100644
+--- a/src/builtins/commandline.rs
++++ b/src/builtins/commandline.rs
+@@ -99,6 +99,11 @@ fn replace_part(
+     }
+ }
+ 
++/// fishy: `commandline --insert-smart`'s "$ " stripping, for `__fishy paste`.
++pub(crate) fn fishy_strip_dollar_prefixes(prefix: &wstr, insert: &wstr) -> Option<WString> {
++    strip_dollar_prefixes(AppendMode::InsertSmart, prefix, insert)
++}
++
+ // Prefix must be at the beginning of a process.
+ fn strip_dollar_prefixes(insert_mode: AppendMode, prefix: &wstr, insert: &wstr) -> Option<WString> {
+     if insert_mode != AppendMode::InsertSmart {
 diff --git a/src/builtins/shared/misc.rs b/src/builtins/shared/misc.rs
 index 39ee74d9e..465303e12 100644
 --- a/src/builtins/shared/misc.rs
@@ -30,10 +71,10 @@ index 87803da12..0115d126c 100644
      use super::{combine_command_and_autosuggestion, completion_apply_to_command_line};
 diff --git a/src/reader/reader/fishy.rs b/src/reader/reader/fishy.rs
 new file mode 100644
-index 000000000..e2f3fc5ce
+index 000000000..f6746a03d
 --- /dev/null
 +++ b/src/reader/reader/fishy.rs
-@@ -0,0 +1,1539 @@
+@@ -0,0 +1,1711 @@
 +//! `__fishy`: headless access to the reader's completion, autosuggestion, word
 +//! motion and history logic, so another line editor (zsh, via fishy-zsh) can
 +//! reproduce fish's interactive behavior exactly instead of approximating it.
@@ -1010,6 +1051,26 @@ index 000000000..e2f3fc5ce
 +                record(streams, &[L!("K"), &with, &next.description]);
 +            }
 +        }
++        Some("paste") => {
++            // __fish_paste SEARCH_SHOWN CURSOR LINE DATA (see zsh_paste)
++            //   S text          insert text into the pager's search field
++            //   B line cursor   the new command line (commandline --insert-smart)
++            //   (nothing)       nothing to insert
++            let (Some(search), Some(cur), Some(line), Some(data)) =
++                (arg(2), arg(3).and_then(parse_usize), arg(4), arg(5))
++            else {
++                return bad;
++            };
++            let root = parser
++                .eval(L!("fish_is_root_user"), &crate::io::IoChain::new())
++                .status
++                .is_success();
++            match zsh_paste(data, search == "1", line, cur.min(line.len()), root) {
++                PasteResult::SearchField(text) => record(streams, &[L!("S"), &text]),
++                PasteResult::Buffer(text, pos) => record(streams, &[L!("B"), &text, &num(pos)]),
++                PasteResult::Nothing => {}
++            }
++        }
 +        Some("escape") => {
 +            let Some(z) = arg(2).map(ZshOpts::parse) else {
 +                return bad;
@@ -1382,6 +1443,158 @@ index 000000000..e2f3fc5ce
 +        i += 1;
 +    }
 +    q
++}
++
++// ---------------------------------------------------------------------------
++// Bracketed paste: share/functions/__fish_paste.fish, line for line, with
++// zsh's quoting where fish's would write fish syntax.
++
++/// __fish_tokenizer_state's states. zsh's plain single quotes take no escapes
++/// (so fish's `single-escaped` cannot occur in them); zsh's `$'...'` takes
++/// backslash escapes exactly like fish's single quotes, so it gets fish's two
++/// single-quote states.
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++enum PasteQuote {
++    Normal,
++    Single,
++    DollarSingle,
++    DollarSingleEscaped,
++    Double,
++    DoubleEscaped,
++    Escaped,
++}
++
++/// __fish_tokenizer_state -i INITIAL -- S, for zsh. Otherwise fish's state
++/// machine exactly, quirks included (a quote after a backslash leaves
++/// `escaped` as it is, as does `'` in `double-escaped`).
++fn zsh_tokenizer_state(s: &wstr, initial: PasteQuote) -> PasteQuote {
++    use PasteQuote::*;
++    let mut state = initial;
++    // Unquoted `$`s just seen: an odd run makes the next `'` start $'...'
++    // (`$$` is a parameter of its own).
++    let mut dollars = 0usize;
++    for c in s.chars() {
++        let before = state;
++        state = match (c, state) {
++            ('\'', Normal) if dollars % 2 == 1 => DollarSingle,
++            ('\'', Normal) => Single,
++            ('\'', DollarSingleEscaped) => DollarSingle,
++            ('\'', Single | DollarSingle) => Normal,
++            ('"', Normal | DoubleEscaped) => Double,
++            ('"', Double) => Normal,
++            ('\'' | '"', s) => s,
++            ('\\', Normal) => Escaped,
++            ('\\', Escaped) => Normal,
++            ('\\', Double) => DoubleEscaped,
++            ('\\', DoubleEscaped) => Double,
++            ('\\', DollarSingle) => DollarSingleEscaped,
++            ('\\', DollarSingleEscaped) => DollarSingle,
++            (_, Escaped) => Normal,
++            (_, DoubleEscaped) => Double,
++            (_, DollarSingleEscaped) => DollarSingle,
++            (_, s) => s,
++        };
++        dollars = if c == '$' && before == Normal && state == Normal { dollars + 1 } else { 0 };
++    }
++    state
++}
++
++/// `string trim -l` (default characters).
++fn trim_left(s: &wstr) -> WString {
++    let chars = s.as_char_slice();
++    let n = chars.iter().take_while(|c| " \x0C\n\r\t\x0B".contains(**c)).count();
++    s[n..].to_owned()
++}
++
++enum PasteResult {
++    SearchField(WString),
++    Buffer(WString, usize),
++    Nothing,
++}
++
++/// __fish_paste DATA, given the reader state it reads through `commandline`.
++fn zsh_paste(data: &wstr, search_field: bool, line: &wstr, cursor: usize, root: bool) -> PasteResult {
++    use PasteQuote::*;
++    // set -l data (string split \r -- $argv[1] | string split \n)
++    // set data (string replace -ra [[:cntrl:]] '' -- $data)
++    // ([[:cntrl:]] is ASCII-only in fish's PCRE2: U+0000-001F and U+007F.)
++    let mut data: Vec<WString> = data
++        .as_char_slice()
++        .split(|&c| c == '\r' || c == '\n')
++        .map(|l| l.iter().filter(|&&c| !(c < ' ' || c == '\x7F')).collect())
++        .collect();
++
++    // if commandline --search-field >/dev/null: commandline --search-field -i -- $data
++    if search_field {
++        return PasteResult::SearchField(join_strings(&data, '\n'));
++    }
++
++    // set -l quote_state (__fish_tokenizer_state -- (commandline -ct | string collect))
++    let (tok, _) = get_token_extent(line, cursor);
++    let token = &line[tok.start..cursor.max(tok.start)];
++    let kept = token.len() - token.chars().rev().take_while(|&c| c == '\n').count();
++    let token = &token[..kept]; // string collect drops trailing newlines
++    let mut quote_state = zsh_tokenizer_state(token, Normal);
++
++    match quote_state {
++        // An unmatched single quote: make the paste one literal token. fish
++        // backslashes ' and \; in zsh's plain single quotes that is '\''
++        // (backslashes are literal there), in $'...' it is fish's rule.
++        Single => {
++            for d in &mut data {
++                *d = d.replace(L!("'"), L!("'\\''"));
++            }
++        }
++        DollarSingle | DollarSingleEscaped => {
++            for d in &mut data {
++                let mut out = WString::new();
++                for c in d.chars() {
++                    if c == '\'' || c == '\\' {
++                        out.push('\\');
++                    }
++                    out.push(c);
++                }
++                *d = out;
++            }
++        }
++        Double | DoubleEscaped => {}
++        Normal | Escaped if data.len() > 1 => {
++            // Leading whitespace in subsequent lines is unneeded (fish indents).
++            let mut tmp = vec![];
++            for l in &data {
++                tmp.push(if quote_state == Normal { trim_left(l) } else { l.clone() });
++                quote_state = zsh_tokenizer_state(l, quote_state);
++            }
++            data.truncate(1);
++            data.extend(tmp.into_iter().skip(1));
++        }
++        Normal | Escaped => {}
++    }
++
++    // if not string length -q -- (commandline -c): at the very start, trim the
++    // first line so a leading space doesn't keep the command out of history.
++    // (The command substitution drops newlines: a prefix of only newlines
++    // counts as empty.)
++    if line[..cursor].chars().all(|c| c == '\n') {
++        data[0] = trim_left(&data[0]);
++    }
++
++    // if test -n "$data"
++    if data.len() == 1 && data[0].is_empty() {
++        return PasteResult::Nothing;
++    }
++    // commandline --insert-smart -- $data   (--insert for root)
++    let insert = join_strings(&data, '\n');
++    let insert = if root {
++        insert
++    } else {
++        crate::builtins::commandline::fishy_strip_dollar_prefixes(&line[..cursor], &insert)
++            .unwrap_or(insert)
++    };
++    let mut out = line[..cursor].to_owned();
++    out.push_utfstr(&insert);
++    out.push_utfstr(&line[cursor..]);
++    PasteResult::Buffer(out, cursor + insert.len())
 +}
 +
 +/// get_quote for zsh: the quote still open at offset `len` of the token.

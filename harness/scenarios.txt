@@ -90,3 +90,6 @@ exec-incomplete	'=echo "abc' enter
 exec-incomplete-if	'=if true' enter
 exec-backslash	'=echo a \' enter
 exec-alt-enter	'=echo a' alt-enter
+exec-final-colors-typed	'=cat notes.txt' enter
+exec-final-colors-typeahead	'!cat notes.txt'
+exec-final-colors-tab	'=cat note' tab enter

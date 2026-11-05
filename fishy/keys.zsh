@@ -48,10 +48,16 @@ _fishy_is_self_insert_key() {
   [[ ${#k} == 1 ]] || return 1
   [[ $k == [[:print:]] || $k == [^[:ascii:]] ]]
 }
+#
+# The key that ends a batch is handled in the same fish event loop iteration
+# (read_normal_chars returns it), so fish's color_suggest_repaint_now does not
+# run between the two: the batch then requests no highlight/autosuggestion
+# (the next command's own update does). This decides, e.g., whether Enter
+# right after typed-ahead text gets the quick no-I/O highlight.
 _fishy_w_self_insert() {
   fishy-unswap
   local k=$KEYS acc=''
-  local -i expand_after_acc=0
+  local -i expand_after_acc=0 deferred=0
   while (( PENDING > 0 )); do
     acc+=$k
     if [[ $_fishy_expand_chars == *"$k"* ]]; then
@@ -61,12 +67,12 @@ _fishy_w_self_insert() {
     read -k 1 k || { k=''; break }
     if ! _fishy_is_self_insert_key "$k"; then
       zle -U -- "$k"
-      k=''
+      k='' deferred=1
       break
     fi
   done
   if [[ -n $acc ]]; then
-    _fishy_insert_batch "$acc"
+    _fishy_insert_batch "$acc" $(( deferred || expand_after_acc ))
     (( expand_after_acc )) && _fishy_run expand-abbr
   fi
   if [[ -n $k ]]; then

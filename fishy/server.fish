@@ -47,11 +47,15 @@ end
 
 builtin __fishy serve-init
 
-# Shell state belongs to zsh. Tools that hook both shells keep their zsh hook
-# (zsh's config runs it) and lose the fish one here: direnv's vendor_conf.d
-# hook loads even in non-interactive fish and would run on every fish_prompt
-# event, changing the server's environment behind zsh's back.
-for f in __direnv_export_eval __direnv_export_eval_2
+# Shell state belongs to zsh. The config above ran as interactive fish's does
+# (__fishy_interactive_config, see bridge.zsh), so it also installed the fish
+# hooks of tools that hook zsh too. Those keep their zsh hook (zsh's config
+# runs it) and lose the fish one here, or every event the server replays would
+# act twice:
+#   direnv  fish_prompt/fish_preexec  would change the server's environment
+#   atuin   fish_preexec/fish_postexec  would record each command twice
+#   zoxide  PWD  would add each directory twice
+for f in __direnv_export_eval __direnv_export_eval_2 _atuin_preexec _atuin_postexec __zoxide_hook
     builtin functions --erase $f
 end
 __fishy_serve

@@ -22,6 +22,8 @@ Step syntax (one CLI arg per step):
   resize:80x30   resize the terminal
   !cmd           type cmd + enter, then wait for the prompt to come back
   >cmd           type cmd + enter, don't wait (e.g. to interrupt it)
+  paste:text     bracketed paste of text (escapes: \\n \\r \\t \\e \\\\ \\xHH),
+                 framed as Ghostty frames it when the shell enabled mode 2004
 
 Examples:
   uv run harness/fz.py shot '=git ch' tab
@@ -33,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -134,6 +137,15 @@ for _c in "abcdefghijklmnopqrstuvwxyz":
     KEYS[f"ctrl-{_c}"] = bytes([ord(_c) - 96])
 
 
+def unescape(text: str) -> bytes:
+    """paste: step text -> bytes (UTF-8, with a few backslash escapes)."""
+    simple = {"n": "\n", "r": "\r", "t": "\t", "e": "\x1b", "\\": "\\"}
+    def one(m: re.Match[str]) -> str:
+        e = m.group(1)
+        return chr(int(e[1:], 16)) if e.startswith("x") else simple[e]
+    return re.sub(r"\\(x[0-9a-fA-F]{2}|[nrte\\])", one, text).encode()
+
+
 def key_bytes(step: str) -> bytes:
     if step in KEYS:
         return KEYS[step]
@@ -143,7 +155,14 @@ def key_bytes(step: str) -> bytes:
 
 
 def termctrl(*args: str, stdin: bytes | None = None, check: bool = True) -> str:
-    res = subprocess.run(["termctrl", *args], input=stdin, capture_output=True)
+    # Under parallel load termctrl's server sometimes fails to read a request
+    # (EAGAIN, "failed to read session request"): nothing was delivered, so
+    # the request is simply sent again.
+    for _ in range(5):
+        res = subprocess.run(["termctrl", *args], input=stdin, capture_output=True, check=False)
+        if b"failed to read session request" not in res.stderr:
+            break
+        time.sleep(0.05)
     if check and res.returncode != 0:
         raise RuntimeError(f"termctrl {args}: {res.stderr.decode().strip()}")
     return res.stdout.decode()
@@ -307,7 +326,7 @@ PLAIN = Style()
 
 
 def color_name(rgb: dict[str, int], default: str) -> str:
-    hexv = "%02x%02x%02x" % (rgb["r"], rgb["g"], rgb["b"])
+    hexv = f"{rgb['r']:02x}{rgb['g']:02x}{rgb['b']:02x}"
     if hexv == default:
         return ""
     return PALETTE_NAME.get(hexv, f"#{hexv}")
@@ -440,7 +459,9 @@ def send(name: str, step: str) -> None:
         cols, _, rows = step.removeprefix("resize:").partition("x")
         termctrl("resize", "--cols", cols, "--rows", rows, name)
         return
-    if step.startswith("="):
+    if step.startswith("paste:"):
+        data = b"\x1b[200~" + unescape(step.removeprefix("paste:")) + b"\x1b[201~"
+    elif step.startswith("="):
         data = step[1:].encode()
     elif step.startswith(("!", ">")):
         data = step[1:].encode() + b"\r"

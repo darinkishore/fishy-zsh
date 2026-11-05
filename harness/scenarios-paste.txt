@@ -1,0 +1,37 @@
+# name<TAB>steps: bracketed paste (share/functions/__fish_paste.fish).
+
+paste-simple	'paste:echo hello'
+paste-execute	'paste:echo hello' enter
+paste-middle	'=echo world' left left left left left 'paste:hello '
+paste-unicode	'paste:echo héllo ✓ 日本'
+paste-multiline-indent	'paste:for x in a b\n    echo $x\nend'
+paste-crlf	'paste:echo a\r\necho b'
+paste-cr-only	'paste:echo a\recho b'
+paste-tabs-and-controls	'paste:echo\ta\x01b\x7fc\x1fd'
+paste-leading-space-start	'paste:   ls -la'
+paste-leading-space-mid	'=echo' 'paste:   x'
+paste-leading-space-line2	'=echo a' enter 'paste:  b'
+paste-dollar-prompts	'paste:$ ls -la\n$ echo hi'
+paste-dollar-mid	'=echo ' 'paste:$ x'
+paste-dollar-not-command	'paste:echo $ x'
+paste-double-quote	'=echo "' 'paste:a\n   b'
+paste-double-quote-closed	'=echo "a" ' 'paste:x\n   y'
+paste-escaped	'=echo a\' 'paste:b\n   c'
+paste-trailing-newline	'paste:ls\n'
+paste-only-newline	'paste:\n'
+paste-empty	'paste:'
+paste-only-spaces	'paste:   '
+paste-only-controls	'paste:\x01\x02'
+paste-undo	'paste:echo hello' ctrl-z
+paste-undo-after-typed	'=git ' 'paste:status' ctrl-z
+paste-undo-redo	'paste:echo hello' ctrl-z 'alt-/'
+paste-two-undo	'paste:echo ' 'paste:hello' ctrl-z
+paste-suggest-preserved	'=git ch' 'paste:eck'
+paste-suggest-new	'paste:git ch'
+paste-into-pager	'=git ch' tab tab 'paste:x'
+paste-search-field	'=git ch' tab ctrl-s 'paste:main'
+paste-history-search	up 'paste:x'
+paste-tab-after	'paste:git ch' tab
+paste-tab-tab-after	'=git ch' tab 'paste:e' tab
+paste-yank-after	'=echo abc' ctrl-w 'paste:x' ctrl-y
+paste-long-wrap	'paste:echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'

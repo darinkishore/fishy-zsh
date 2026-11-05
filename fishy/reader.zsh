@@ -262,10 +262,12 @@ _fishy_run() {
 }
 
 # fish: read_normal_chars' accumulated insertion (note: unlike the Key event
-# path it does not reset the history search).
+# path it does not reset the history search). $2=1: the event that ended the
+# batch follows in the same loop iteration, so no highlight/suggest update yet.
 _fishy_insert_batch() {
   fishy-unswap
   local text=$1
+  local -i deferred=${2:-0}
   [[ $_fishy_last_cmd == (yank|yank-pop) ]] || _fishy_yank_len=0
   if fishy-search-focused; then
     _fp_search_text+=$text
@@ -277,6 +279,7 @@ _fishy_insert_batch() {
     fishy-pager-clear
   fi
   _fishy_last_cmd=''
+  (( deferred )) && return
   fishy-suggest-update
   fishy-highlight-update
 }
@@ -884,9 +887,13 @@ _fishy_display_edits() {
 }
 
 # zle-line-pre-redraw: compose POSTDISPLAY and region_highlight.
+# The command line as last drawn (fish: rendered_layout.text).
+typeset -g _fishy_rendered_text=''
+
 fishy-render() {
   emulate -L zsh -o extendedglob
   fishy-unswap
+  _fishy_rendered_text=$BUFFER
   region_highlight=("${(@)region_highlight:#*memo=fishy}")
   # Syntax colors first; suggestion/pager/search-match/flash entries follow and
   # take precedence where they overlap.

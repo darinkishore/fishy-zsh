@@ -1,0 +1,24 @@
+#! config abbr
+# name<TAB>steps: abbreviations defined in config.fish's interactive block.
+
+abbr-cl-word	'=cl'
+abbr-cl-space	'=cl '
+abbr-cl-args	'=cl --resume'
+abbr-js-space	'=js '
+abbr-cl-semicolon	'=cl;'
+abbr-cl-pipe	'=cl|'
+abbr-cl-ctrl-space	'=cl' ctrl-space
+abbr-cl-alt-enter	'=cl' alt-enter
+abbr-not-argument	'=echo cl '
+abbr-after-pipe	'=echo x | cl '
+abbr-after-and	'=true && cl '
+abbr-time	'=time cl '
+abbr-sudo	'=sudo cl '
+abbr-undo	'=cl ' ctrl-z
+abbr-undo-twice	'=cl ' ctrl-z ctrl-z
+abbr-cursor-middle	'=cl' left '= '
+abbr-enter-runs	'=e' enter
+abbr-enter-args	'=e more' enter
+abbr-tab	'=cl' tab
+abbr-suggest	'=j'
+abbr-pasted-not-expanded	'paste:cl '

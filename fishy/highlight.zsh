@@ -64,10 +64,29 @@ _fishy_async_done_highlight() {
   _fhl_apply_records ${#BUFFER} "$@"
 }
 
-# fish: finish_highlighting_before_exec: if the current colors are stale, do a
-# quick highlight without I/O so the final rendering is right.
+# fish: finish_highlighting_before_exec. The current colors are right if no
+# highlight is in flight and the text is what was last drawn; if the in-flight
+# request is for this very text, wait for it (HIGHLIGHT_TIMEOUT_FOR_EXECUTION,
+# 250ms). Otherwise do a quick highlight without I/O.
 fishy-highlight-finish() {
-  [[ -z $_fhl_req_id ]] && return
+  local -i ok=0
+  if [[ -z $_fhl_req_id ]]; then
+    [[ $_fishy_rendered_text == "$BUFFER" ]] && ok=1
+  elif [[ $_fhl_inflight == "$BUFFER" ]]; then
+    local -F deadline=$(( EPOCHREALTIME + 0.25 )) left
+    local -i cs
+    local fd=$_fishy_rfd[async]
+    while [[ -n $_fhl_req_id && -n $fd ]]; do
+      left=$(( deadline - EPOCHREALTIME ))
+      (( left > 0 )) || break
+      # zselect -t is in hundredths of a second (rounded up).
+      cs=$(( left * 100 + 0.999 ))
+      zselect -t $cs -r $fd 2>/dev/null || break
+      _fishy_async_consume || break
+    done
+    [[ -z $_fhl_req_id ]] && ok=1
+  fi
+  (( ok )) && return
   fishy-call sync highlight 0 $CURSOR "$BUFFER" || return
   _fhl_apply_records ${#BUFFER} "$fishy_reply[@]"
   _fhl_inflight='' _fhl_req_id=''
