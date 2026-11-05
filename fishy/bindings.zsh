@@ -40,16 +40,29 @@ _fishy_commandline_change() {
 typeset -g _fishy_bind_out=''
 typeset -ga _fishy_bind_fns
 _fishy_bind_eval() {
-  local code=$1 rec
+  local code=$1
+  _fishy_bind_state
+  fishy-call sync bind-run $CURSOR "$BUFFER" "$code" "$reply[@]" || return 1
+  _fishy_bind_apply "$fishy_reply[@]"
+}
+
+# bind-run's records: O output, B command line, Q search field, F functions.
+_fishy_bind_apply() {
+  local rec
+  local -a recs=("$@") f
   _fishy_bind_out='' _fishy_bind_fns=()
-  fishy-call sync bind-run $CURSOR "$BUFFER" "$code" || return 1
-  local -a recs=("$fishy_reply[@]") f
   for rec in "$recs[@]"; do
     case $rec in
       (O$'\x1f'*) _fishy_bind_out+=${rec#O$'\x1f'} ;;
       (B$'\x1f'*)
         f=("${(@ps:\x1f:)rec}")
         _fishy_commandline_change "$f[2]" $f[3] ;;
+      (Q$'\x1f'*)
+        # commandline --search-field: the field's cursor stays at its end.
+        f=("${(@ps:\x1f:)rec}")
+        _fp_search_text=$f[2]
+        fishy-pager-refilter
+        fishy-pager-selection-changed ;;
       (F$'\x1f'*) _fishy_bind_fns+=(${rec#F$'\x1f'}) ;;
     esac
   done

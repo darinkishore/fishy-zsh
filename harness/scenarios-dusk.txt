@@ -1,0 +1,28 @@
+#! config dusk
+# name<TAB>steps: dusk's fish plugins, through fishy's user bindings (taken
+# from fish's own binding table): autopair (runs in the server), fzf.fish (a
+# one-shot fish on the terminal), sponge (history events).
+
+autopair-paren	'=echo ' '=(' '=a'
+autopair-skip-close	'=echo ' '=(' '=a' '=)' '=x'
+autopair-backspace-pair	'=echo ' '=(' backspace
+autopair-backspace-inner	'=echo ' '=(' '=a' backspace backspace
+autopair-nested	'=echo ' '=[' '={' '=(' '=x'
+autopair-quotes	'=echo ' '="' '=hi' '="' '=x'
+autopair-single-quote	"=echo " "='" '=hi'
+autopair-quote-after-word	'=echo a' '="'
+autopair-quote-odd	'=echo "a' '="'
+autopair-close-alone	'=echo )'
+autopair-mid-word	'=echoab' left '=('
+autopair-tab-complete	'=cd Doc' tab
+autopair-tab-pager	'=git ch' tab tab
+autopair-typed-ahead	'=echo (a "b" [c])'
+autopair-ctrl-h	'=echo ' '=(' ctrl-h
+fzf-dir-select	'=cat ' ctrl-alt-f @0.5 '=report' @0.5 enter @0.3
+fzf-dir-cancel	'=echo hi' ctrl-alt-f @0.5 escape @0.3
+fzf-dir-token-query	'=cat Doc' ctrl-alt-f @0.5 enter @0.3
+fzf-git-status-empty	ctrl-alt-s @0.5 escape @0.3
+sponge-failed-dropped	'!false one' '!echo a' '!echo b' '!echo c' up up up up
+sponge-failed-kept-while-recent	'!false one' '!echo a' up up
+sponge-suggestion-gone	'!false one' '!echo a' '!echo b' '!echo c' '=fal'
+sponge-success-kept	'!true one' '!echo a' '!echo b' '!echo c' up up up up

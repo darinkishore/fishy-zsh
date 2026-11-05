@@ -1,5 +1,5 @@
 diff --git a/src/bin/fish.rs b/src/bin/fish.rs
-index 700f44577..6016ca083 100644
+index 700f44577..4667ae449 100644
 --- a/src/bin/fish.rs
 +++ b/src/bin/fish.rs
 @@ -481,7 +481,20 @@ fn throwing_main() -> i32 {
@@ -23,6 +23,40 @@ index 700f44577..6016ca083 100644
      }
  
      if is_interactive_session() && opts.no_config && !opts.no_exec {
+@@ -591,17 +604,22 @@ fn throwing_main() -> i32 {
+         parser.last_status()
+     };
+ 
+-    event::fire(
+-        parser,
+-        Event::process_exit(Pid::from_nullable_pid_unchecked(getpid()), exit_status),
+-    );
+-
+-    // Trigger any exit handlers.
+-    event::fire_generic(
+-        parser,
+-        L!("fish_exit").to_owned(),
+-        vec![exit_status.to_wstring()],
+-    );
++    // fishy: its async server and one-shot binding runs are not the user's
++    // shell exiting; their config's exit handlers must not run (sponge would
++    // edit history there).
++    if std::env::var_os("__fishy_no_exit_event").is_none() {
++        event::fire(
++            parser,
++            Event::process_exit(Pid::from_nullable_pid_unchecked(getpid()), exit_status),
++        );
++
++        // Trigger any exit handlers.
++        event::fire_generic(
++            parser,
++            L!("fish_exit").to_owned(),
++            vec![exit_status.to_wstring()],
++        );
++    }
+ 
+     if let Some(profile_output) = opts.profile_output {
+         parser.flush_profiling(&profile_output);
 diff --git a/src/builtins/commandline.rs b/src/builtins/commandline.rs
 index bade3b05d..f6202e54c 100644
 --- a/src/builtins/commandline.rs
@@ -87,10 +121,20 @@ index 39ee74d9e..465303e12 100644
          name: L!("abbr"),
          func: abbr::abbr,
 diff --git a/src/history/history.rs b/src/history/history.rs
-index 47512ea59..3af912b19 100644
+index 47512ea59..5453cb538 100644
 --- a/src/history/history.rs
 +++ b/src/history/history.rs
-@@ -1466,6 +1466,23 @@ pub fn incorporate_external_changes(&self) {
+@@ -1245,6 +1245,9 @@ pub fn is_empty(&self) -> bool {
+     /// Remove a history item.
+     pub fn remove(&self, s: &wstr) {
+         self.imp().remove(s);
++        // fishy: tell zsh, which tells the other server (fish code such as
++        // sponge deletes history items inside event handlers).
++        FISHY_REMOVED.with(|r| r.borrow_mut().push(s.to_owned()));
+     }
+ 
+     /// Remove any trailing ephemeral items.
+@@ -1466,6 +1469,23 @@ pub fn incorporate_external_changes(&self) {
          self.imp().incorporate_external_changes();
      }
  
@@ -114,6 +158,84 @@ index 47512ea59..3af912b19 100644
      /// Gets all the history into a list. This is intended for the $history environment variable.
      /// This may be long!
      pub fn get_history(&self) -> Vec<WString> {
+@@ -2536,3 +2556,9 @@ fn test_history_formats() {
+         test_history_imported_from_corrupted.clear();
+     }
+ }
++
++thread_local! {
++    /// fishy: history items removed since the last `__fishy reply`.
++    pub static FISHY_REMOVED: std::cell::RefCell<Vec<WString>> =
++        const { std::cell::RefCell::new(Vec::new()) };
++}
+diff --git a/src/input/binding.rs b/src/input/binding.rs
+index c3a23b2a0..e31c47e1a 100644
+--- a/src/input/binding.rs
++++ b/src/input/binding.rs
+@@ -301,6 +301,27 @@ pub struct BindingSet {
+ }
+ 
+ impl BindingSet {
++    /// fishy: the user bindings of `mode`, in matching order: each binding's
++    /// keys, whether it is a raw escape sequence binding, its commands, and
++    /// the mode it switches to.
++    pub fn fishy_user_bindings(
++        &self,
++        mode: &wstr,
++    ) -> Vec<(Vec<Key>, bool, Vec<WString>, Option<WString>)> {
++        self.bindings
++            .iter()
++            .filter(|b| b.mode == mode)
++            .map(|b| {
++                (
++                    b.seq.clone(),
++                    b.key_name_style == KeyNameStyle::RawEscapeSequence,
++                    b.commands.clone(),
++                    b.sets_mode.clone(),
++                )
++            })
++            .collect()
++    }
++
+     const fn new() -> Self {
+         Self {
+             bindings: Vec::new(),
+diff --git a/src/key.rs b/src/key.rs
+index 7d53d7e52..ac205581f 100644
+--- a/src/key.rs
++++ b/src/key.rs
+@@ -197,6 +197,11 @@ pub(crate) fn canonicalize_keyed_control_char(c: char) -> char {
+         if c == char::from(tm.c_cc[SpecialCharacterIndices::VERASE as usize]) {
+             return BACKSPACE;
+         }
++    } else if fishy_tty_verase().is_some_and(|erase| c == char::from(erase)) {
++        // fishy: a non-interactive fish (fishy's server, a one-shot binding run)
++        // parses the user's `bind \177 ...` as the interactive fish on this
++        // terminal would.
++        return BACKSPACE;
+     }
+     if c == char::from(127) {
+         // when it's not backspace
+@@ -497,3 +502,19 @@ fn test_parse_key() {
+         assert!(parse_keys(L!("F1")).is_err());
+     }
+ }
++
++/// fishy: the erase character of the controlling terminal, for a fish that
++/// has no startup terminal mode of its own.
++fn fishy_tty_verase() -> Option<u8> {
++    static VERASE: std::sync::OnceLock<Option<u8>> = std::sync::OnceLock::new();
++    *VERASE.get_or_init(|| {
++        let fd = unsafe { libc::open(c"/dev/tty".as_ptr(), libc::O_RDONLY | libc::O_NOCTTY) };
++        if fd < 0 {
++            return None;
++        }
++        let mut tm: libc::termios = unsafe { std::mem::zeroed() };
++        let ok = unsafe { libc::tcgetattr(fd, &mut tm) } == 0;
++        unsafe { libc::close(fd) };
++        ok.then(|| tm.c_cc[libc::VERASE])
++    })
++}
 diff --git a/src/reader/reader.rs b/src/reader/reader.rs
 index 87803da12..0115d126c 100644
 --- a/src/reader/reader.rs
@@ -131,10 +253,10 @@ index 87803da12..0115d126c 100644
      use super::{combine_command_and_autosuggestion, completion_apply_to_command_line};
 diff --git a/src/reader/reader/fishy.rs b/src/reader/reader/fishy.rs
 new file mode 100644
-index 000000000..b21560f6e
+index 000000000..29c724ad5
 --- /dev/null
 +++ b/src/reader/reader/fishy.rs
-@@ -0,0 +1,1789 @@
+@@ -0,0 +1,1853 @@
 +//! `__fishy`: headless access to the reader's completion, autosuggestion, word
 +//! motion and history logic, so another line editor (zsh, via fishy-zsh) can
 +//! reproduce fish's interactive behavior exactly instead of approximating it.
@@ -784,6 +906,11 @@ index 000000000..b21560f6e
 +        } else {
 +            Ok(SUCCESS)
 +        };
++        // Every reply also reports history items fish code removed meanwhile.
++        let removed = crate::history::FISHY_REMOVED.with(|r| std::mem::take(&mut *r.borrow_mut()));
++        for item in &removed {
++            record(streams, &[L!("history-removed"), item]);
++        }
 +        let mut bytes = REPLY_SINK.with(|sink| sink.borrow_mut().take()).unwrap_or_default();
 +        bytes.push(0x1e);
 +        bytes.extend_from_slice(&wcs2bytes(id));
@@ -1151,10 +1278,16 @@ index 000000000..b21560f6e
 +            }
 +        }
 +        Some("bind-run") => {
-+            // CURSOR LINE CODE: run a binding's fish code (e.g. a share/functions
-+            // function) against zsh's command line, as eval_bind_cmd would.
++            // CURSOR LINE CODE [FLAGS [FIELD FIELD_CURSOR]]: run a binding's fish
++            // code (e.g. a share/functions function) against zsh's command line,
++            // as eval_bind_cmd would. FLAGS is the rest of the reader state the
++            // `commandline` builtin reports (update_commandline_state): p pager
++            // shown, d pager fully disclosed, s history search active, f search
++            // field shown (FIELD, FIELD_CURSOR). Flag t: output goes where fds 1/2
++            // go (a one-shot fish on the terminal), not into O.
 +            //   O bytes          what it wrote (stdout and stderr)
 +            //   B line cursor    the command line afterwards, if it changed
++            //   Q field cursor   the search field afterwards, if it changed
 +            //   F name           each `commandline -f NAME`, in order (for zsh
 +            //                    to run after applying B; fish runs them inline)
 +            let (Some(cur), Some(line), Some(code)) =
@@ -1162,21 +1295,41 @@ index 000000000..b21560f6e
 +            else {
 +                return bad;
 +            };
++            let flags = arg(5).unwrap_or(L!(""));
++            let has = |c: char| flags.as_char_slice().contains(&c);
++            let field = if has('f') {
++                let (Some(text), Some(pos)) = (arg(6), arg(7).and_then(parse_usize)) else {
++                    return bad;
++                };
++                Some((text.to_owned(), pos.min(text.len())))
++            } else {
++                None
++            };
 +            let cur = cur.min(line.len());
 +            {
 +                let mut st = commandline_state_snapshot();
 +                *st = CommandlineState::new();
 +                st.text = line.to_owned();
 +                st.cursor_pos = cur;
++                st.pager_mode = has('p');
++                st.pager_fully_disclosed = has('d');
++                st.search_mode = has('s');
++                st.search_field = field.clone();
 +            }
 +            let last_statuses = parser.vars().last_statuses();
 +            // `commandline` works only once the reader would have initialized.
 +            let was_initialized = parser.interactive_initialized;
 +            parser.interactive_initialized = true;
 +            crate::builtins::commandline::fishy_readline_capture_begin();
-+            let ((), out) = capture_fds(|| {
++            let out = if has('t') {
 +                let _ = parser.eval(code, &crate::io::IoChain::new());
-+            });
++                vec![]
++            } else {
++                let ((), out) = capture_fds(|| {
++                    let _ = parser.eval(code, &crate::io::IoChain::new());
++                });
++                out
++            };
 +            let functions = crate::builtins::commandline::fishy_readline_capture_end();
 +            parser.interactive_initialized = was_initialized;
 +            parser.set_last_statuses(last_statuses);
@@ -1185,8 +1338,41 @@ index 000000000..b21560f6e
 +            if st.text != line || st.cursor_pos != cur {
 +                record(streams, &[L!("B"), &st.text, &num(st.cursor_pos)]);
 +            }
++            if st.search_field != field {
++                if let Some((text, pos)) = &st.search_field {
++                    record(streams, &[L!("Q"), text, &num(*pos)]);
++                }
++            }
 +            for f in &functions {
 +                record(streams, &[L!("F"), f]);
++            }
++        }
++        Some("user-bindings") => {
++            // The user bindings of the default mode, in the order fish tries
++            // them (find_binding): U STYLE KEYS SETS_MODE COMMANDS...
++            //   STYLE    N (key names) or R (a raw escape sequence)
++            //   KEYS     "mods:codepoint" per key, space-separated (fishy's
++            //            input.zsh notation: shift 1, alt 2, ctrl 4, super 8)
++            //   SETS_MODE  the mode the binding switches to, or empty
++            let list = crate::input::bindings().fishy_user_bindings(L!("default"));
++            for (seq, raw, commands, sets_mode) in list {
++                let mut keys = WString::new();
++                for (i, k) in seq.iter().enumerate() {
++                    if i > 0 {
++                        keys.push(' ');
++                    }
++                    let m = k.modifiers;
++                    let bits = u32::from(m.shift)
++                        | (u32::from(m.alt) << 1)
++                        | (u32::from(m.ctrl) << 2)
++                        | (u32::from(m.sup) << 3);
++                    keys.push_utfstr(&sprintf!("%d:%d", bits, u32::from(k.codepoint)));
++                }
++                let style = if raw { L!("R") } else { L!("N") };
++                let sets = sets_mode.unwrap_or_default();
++                let mut fields: Vec<&wstr> = vec![L!("U"), style, &keys, &sets];
++                fields.extend(commands.iter().map(|c| c.as_utfstr()));
++                record(streams, &fields);
 +            }
 +        }
 +        Some("paste") => {

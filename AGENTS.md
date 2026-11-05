@@ -12,6 +12,8 @@ fish decision comes from fish itself, via a patched fish running as a server.
   - `reader.zsh` and friends — a zsh port of fish's reader control flow.
   - `input.zsh` — fish's key input layer (decoder, `find_binding`, keyboard
     protocols); `keys.zsh` — fish's preset binding table; see "Keys" below.
+  - `user.zsh` — the user's own fish bindings (config, plugins), from fish's
+    binding table; see "User bindings" below.
   - `prompt.zsh` — fish draws the prompt; see "Prompt" below.
   - `server.fish` — the server loop.
 - `functions.zsh` — fish's interactive functions ported line for line
@@ -56,7 +58,9 @@ fish decision comes from fish itself, via a patched fish running as a server.
   interactive-only block, as home-manager writes them), `-paste` (`paste:`
   steps send Ghostty's bracketed-paste framing), `-dirs` (ls/ll/la,
   implicit cd, cd -, prevd/nextd/dirh/cdh, alt-left/right), `-kitty` (keys
-  that differ under kitty's keyboard protocol). `keys.py` / `keymatch.py`:
+  that differ under kitty's keyboard protocol), `-dusk` (dusk's fish plugins:
+  autopair, fzf.fish, sponge; a config's `plugins` file lists nixpkgs fish
+  plugins, installed the way home-manager does). `keys.py` / `keymatch.py`:
   the decoder and the matcher against fish itself (see "Keys").
 - `spec/fish-behavior.md` — 340 source-cited fish behaviors.
 - `try/` — `nix run .#try`: fishy on top of your real zsh config.
@@ -163,6 +167,42 @@ every fish preset to insert its index and diffs the binding chosen per input
 does for the kitty flags the shell has set (replayed from its output), or
 always legacy (`FISHY_KEYS=legacy`); both must pass.
 
+## User bindings
+
+Not written down in fishy: after the sync server's first prompt event (fish's
+interactive setup, which sets fish_key_bindings so plugins install theirs),
+`__fishy user-bindings` lists the default mode's user bindings in fish's
+matching order, keys in input.zsh's `mods:cp` form. Each becomes a table entry
+whose widget runs its commands like binding_execute: readline functions as
+fishy's commands (and/or by function status), fish code as
+- fishy's zsh port, for functions in `_fishy_user_ports` (atuin, fzf's fish
+  bindings, fish's share/functions bindings);
+- `bind-run` in the server, for `_fishy_user_server_fns` (autopair: pure
+  command-line edits, as fast as a readline command);
+- otherwise a one-shot fish on the terminal (`__fishy_interactive_config=1`,
+  `bind-run ... t`: output not captured, command line, cursor and reader
+  state in, edits out on fd 3), ~50ms to start; fzf.fish runs there. After
+  it, fishy writes `\r` and redraws from the cursor's line, as fish's
+  check_status/reset_line do when the terminal was written to.
+`bind-run` passes the reader state `commandline` reports (pager shown, fully
+disclosed, history search, search field) and returns search-field edits.
+
+Plugins that hook fish events work in the server (sponge): its history
+deletions come back on every reply as `history-removed` records, which the
+bridge forwards to the async server (`history-remove ... forget`). On exit
+the sync server gets EOF and exits by itself, so fish_exit handlers run
+(sponge's last purge); the async server and one-shot fishes run with
+`__fishy_no_exit_event` (no exit handlers: they must not touch history). A
+non-interactive fish has no startup terminal modes, so the patch reads VERASE
+from /dev/tty: `bind \177` means backspace as in interactive fish.
+
+Gotchas: zle keeps $WIDGET at the outer widget when a widget calls another,
+so each user binding gets its own function. Test against the nix build, not
+a cargo build: a cargo build's sysconfdir is not /etc/fish, so it skips the
+system config.fish (whose fish_function_path changes make interactive fish
+re-autoload sponge's handlers twice -- fish's behavior, matched by the nix
+build; see the dusk suite).
+
 ## Prompt
 
 `prompt.zsh` replays fish's prompt lifecycle at the matching zsh hooks:
@@ -221,3 +261,5 @@ Known gaps:
   sequence of its own, so this only matters on legacy terminals.
 - No history pager: ctrl-r does nothing without atuin (darin's atuin binds
   it).
+- fzf.fish's ctrl-v (search variables) runs in a one-shot fish: it lists that
+  fish's variables (environment + config), not zsh's shell variables.

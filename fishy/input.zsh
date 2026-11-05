@@ -195,10 +195,22 @@ _fk_parse_keys() {
 # functions (fish turns the keyboard protocols off while it runs).
 
 typeset -ga _fishy_user_binds _fishy_preset_binds
+# fishy-bind [-u] [-s] [-K [-R]] KEY WIDGET
+#   -u  a user binding (tried before the presets)
+#   -s  fish code (protocols off while it runs)
+#   -K  KEY is already keys in fishy's "mods:cp ..." form; -R a raw escape
+#       sequence binding (user-bindings hands them over that way)
 fishy-bind() {
   local list=_fishy_preset_binds flags=''
-  [[ $1 == -u ]] && { list=_fishy_user_binds; shift }
-  [[ $1 == -s ]] && { flags=s; shift }
+  while [[ $1 == -[usKR] ]]; do
+    case $1 in
+      (-u) list=_fishy_user_binds ;;
+      (-s) flags+=s ;;
+      (-K) flags+=K ;;
+      (-R) flags+=R ;;
+    esac
+    shift
+  done
   local spec=$1 widget=$2 e
   local -a cur=("${(@P)list}")
   local -i i
@@ -232,6 +244,9 @@ _fishy_binds_compile() {
     spec=$f[1]
     if [[ -z $spec ]]; then
       _fkb_style+=(G) _fkb_keys+=('')
+    elif [[ $f[3] == *K* ]]; then
+      if [[ $f[3] == *R* ]]; then _fkb_style+=(R); else _fkb_style+=(N); fi
+      _fkb_keys+=("$spec")
     else
       _fk_parse_keys "$spec" || { fishy-log "bind: cannot parse key '$spec'"; continue }
       if [[ $REPLY == raw ]]; then _fkb_style+=(R); else _fkb_style+=(N); fi
@@ -851,6 +866,7 @@ _fishy_bind_exec() {
   local -i script=0
   [[ $_fkb_flags[$1] == *s* ]] && script=1
   (( script )) && _fishy_protocols_set 0
+  typeset -g _fishy_cur_event=$2    # the key event (a user binding's self-insert)
   case $widget in
     (@self-insert) _fishy_key_insert "$2" ;;
     (@self-insert-expand) _fishy_key_insert "$2"; _fishy_run expand-abbr ;;

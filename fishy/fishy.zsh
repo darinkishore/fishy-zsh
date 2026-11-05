@@ -32,6 +32,7 @@ source $FISHY_DIR/integrations.zsh
 source $FISHY_DIR/prompt.zsh
 source $FISHY_DIR/functions.zsh
 source $FISHY_DIR/bindings.zsh
+source $FISHY_DIR/user.zsh
 
 # fish's implicit cd (`..`, `dir/`: IMPLICIT_CD, fishy's zsh patch), and fish's
 # cd never prints the directory (zsh's does for cd -, +N and CDPATH hits).
@@ -91,6 +92,7 @@ _fishy_sync_commands() {
 
 _fishy_line_init() {
   _fishy_protocols_line_init
+  fishy-user-bindings-load
   (( ${#_fishy_face} )) || fishy-theme-collect
   fishy-reader-line-init
 }
@@ -112,8 +114,8 @@ add-zle-hook-widget line-finish _fishy_line_finish
 fishy-prompt-install
 
 fishy-bindings-install
-# darin's fish layers atuin and fzf on top of the defaults; so does fishy
-# (FISHY_INTEGRATIONS=0 keeps stock fish bindings, e.g. for the harness).
+# zoxide's zsh hooks with fish's z semantics (FISHY_INTEGRATIONS=0: leave
+# them alone). Key bindings come from the user's fish config (user.zsh).
 [[ ${FISHY_INTEGRATIONS:-1} == 1 ]] && fishy-integrations-install
 fishy-keys-install
 # fish's keyboard protocols (kitty's, where the terminal has it; input.zsh).

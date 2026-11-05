@@ -331,15 +331,6 @@ _fishy_zoxide_install() {
 
 fishy-integrations-install() {
   (( $+functions[__zoxide_z] && $+functions[__zoxide_pwd] )) && _fishy_zoxide_install
-  # In darin's fish these are user bindings (fish code), in this order.
-  if (( $+commands[fzf] )); then
-    fishy-bind -u -s ctrl-t fishy-fzf-file
-    fishy-bind -u -s alt-c fishy-fzf-cd
-    fishy-bind -u -s shift-tab fishy-fzf-complete
-  fi
-  if (( $+commands[atuin] )); then
-    fishy-bind -u -s ctrl-r fishy-atuin-search
-    fishy-bind -u -s up fishy-atuin-up
-    fishy-bind -u -s '?' fishy-atuin-question
-  fi
+  # Their key bindings are the user's fish bindings (user.zsh), which map
+  # these functions to their ports here.
 }

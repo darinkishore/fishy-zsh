@@ -141,6 +141,13 @@
         # harness/configs/pure: darin's prompt plugin (same store path as their
         # home-manager config) and the VCS tools its prompt runs.
         "fish-pure" = pkgs.fishPlugins.pure.src;
+        # harness/configs/dusk: the plugins dusk's fish loads, and the tools
+        # fzf.fish runs.
+        "fish-autopair" = pkgs.fishPlugins.autopair.src;
+        "fish-fzf-fish" = pkgs.fishPlugins.fzf-fish.src;
+        "fish-sponge" = pkgs.fishPlugins.sponge.src;
+        "bin/fzf" = "${pkgs.fzf}/bin/fzf";
+        "bin/fd" = "${pkgs.fd}/bin/fd";
         "bin/git" = "${pkgs.git}/bin/git";
         "bin/jj" = "${pkgs.jujutsu}/bin/jj";
       };

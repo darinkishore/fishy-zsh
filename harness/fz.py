@@ -255,6 +255,10 @@ def key_for(step: str) -> Key:
         return KEYS[step]
     if step.startswith("alt-") and len(step) == 5:
         return _text_key(step[4], ("alt",), b"\x1b" + step[4].encode())
+    if step.startswith("ctrl-alt-") and len(step) == 10 and step[9].islower():
+        # ctrlSeq with Alt (Option-as-Alt): ESC + the control character.
+        c = step[9]
+        return Key(b"\x1b" + bytes([ord(c) & 0x1F]), mods=("ctrl", "alt"), text=c, code=ord(c))
     raise SystemExit(f"unknown key: {step}")
 
 
@@ -364,6 +368,19 @@ def install_config(name: str, home: Path, cfg: Path) -> None:
     """A named fish config (harness/configs/NAME) plus the fixtures it needs."""
     src = ROOT / "harness" / "configs" / name
     shutil.copytree(src, cfg, dirs_exist_ok=True)
+    # Fish plugins (harness/configs/NAME/plugins: one per line), from nixpkgs,
+    # loaded the way home-manager's conf.d/plugin-NAME.fish loads them.
+    plugins = cfg / "plugins"
+    if plugins.exists():
+        (cfg / "conf.d").mkdir(exist_ok=True)
+        for plugin in plugins.read_text().split():
+            (cfg / "conf.d" / f"plugin-{plugin}.fish").write_text(
+                (ROOT / "harness" / "configs" / "plugin-pure.fish.in")
+                .read_text()
+                .replace("# Plugin pure", f"# Plugin {plugin}")
+                .replace("@PURE@", str((DEPS / f"fish-{plugin}").resolve()))
+            )
+        plugins.unlink()
     if not name.startswith("pure"):
         return
     # darin's pure: the nixpkgs plugin, loaded the way home-manager's

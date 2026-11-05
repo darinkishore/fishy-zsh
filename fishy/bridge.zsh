@@ -40,7 +40,13 @@ _fishy_start() {
   # Replies travel on fd 3: fish writes event handler output, titles and the
   # like straight to fds 1/2 (no redirection catches them), so the protocol
   # pipe must not be one of those. The prompt requests capture them.
-  coproc __fishy_interactive_config=1 $FISHY_FISH -c "source ${(q)FISHY_DIR}/server.fish" 3>&1 >/dev/null 2>/dev/null
+  # Only the sync server is "the shell" whose exit runs the user's fish_exit
+  # handlers (sponge purges history there); the async one must not.
+  if [[ $name == sync ]]; then
+    coproc __fishy_interactive_config=1 $FISHY_FISH -c "source ${(q)FISHY_DIR}/server.fish" 3>&1 >/dev/null 2>/dev/null
+  else
+    coproc __fishy_no_exit_event=1 __fishy_interactive_config=1 $FISHY_FISH -c "source ${(q)FISHY_DIR}/server.fish" 3>&1 >/dev/null 2>/dev/null
+  fi
   _fishy_pid[$name]="$!"
   exec {wfd}>&p {rfd}<&p
   # Out of the job table (even without job control a coproc is a job): else
@@ -53,6 +59,20 @@ _fishy_start() {
 # zsh is exiting: stop the servers. Being disowned they get no SIGHUP, and a
 # background command started from this shell may hold their pipe open.
 _fishy_shutdown() {
+  # The async server first (it must not see anything else happen), then the
+  # sync server ends the way fish does: input closed, it exits by itself and
+  # runs fish_exit handlers (sponge's last purge) and saves history. Killed
+  # only if it has not gone after 2s.
+  [[ -n $_fishy_pid[async] ]] && _fishy_stop async
+  local pid=$_fishy_pid[sync] fd
+  if [[ -n $pid ]]; then
+    if [[ -n $_fishy_wfd[sync] ]]; then fd=$_fishy_wfd[sync]; exec {fd}>&-; unset "_fishy_wfd[sync]"; fi
+    local -i i
+    for (( i = 0; i < 200; i++ )); do
+      kill -0 $pid 2>/dev/null || break
+      zselect -t 1 2>/dev/null   # 1/100 s
+    done
+  fi
   local name
   for name in ${(k)_fishy_pid}; do _fishy_stop $name; done
 }
@@ -114,6 +134,13 @@ fishy-recv() {
     if [[ $rec == $'\x1e'* ]]; then
       [[ ${rec#$'\x1e'} == "$id" ]] && return 0
       fishy_reply=()  # terminator of an abandoned request: drop its records
+      continue
+    fi
+    if [[ $rec == history-removed$'\x1f'* ]]; then
+      # Fish code (sponge, say) removed a history item from the sync server's
+      # history: the async server's copy must forget it too. (Handled here,
+      # since fire-and-forget replies are otherwise dropped.)
+      [[ $name == sync ]] && fishy-tell async history-remove "${rec#history-removed$'\x1f'}" forget
       continue
     fi
     fishy_reply+=("$rec")
