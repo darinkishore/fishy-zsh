@@ -60,6 +60,13 @@ fish decision comes from fish itself, via a patched fish running as a server.
   the decoder and the matcher against fish itself (see "Keys").
 - `spec/fish-behavior.md` — 340 source-cited fish behaviors.
 - `try/` — `nix run .#try`: fishy on top of your real zsh config.
+- `flake.nix` `homeManagerModules.default` — `programs.fishy-zsh.enable`:
+  programs.zsh uses fishy's zsh, `.zshenv` starts with `FISHY_FISH` +
+  `start.zsh`, `.zshrc` sources `fishy.zsh` last. darin's echo enables it in
+  `~/src/nix/den/vendor/fishy-zsh.nix` (input `fishy-zsh`, this repo's `main`
+  over ssh); that per-user zsh is also the login shell, so Ghostty and Rex
+  start it. Deploy a change: push `main`, then `nix flake update fishy-zsh`
+  in `~/src/nix` and `just sys`.
 
 ## Running
 

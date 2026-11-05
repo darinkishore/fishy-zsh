@@ -21,6 +21,37 @@
     systems = ["aarch64-darwin" "x86_64-linux" "aarch64-linux"];
     forAll = f: nixpkgs.lib.genAttrs systems (s: f nixpkgs.legacyPackages.${s});
   in {
+    # Home Manager: fishy as your interactive zsh. Your programs.zsh config
+    # stays as it is; fishy goes on top of it (fish's servers boot from
+    # .zshenv, fishy.zsh loads last in .zshrc). Any other zsh reading the same
+    # files (/bin/zsh over ssh) ignores fishy.
+    homeManagerModules.default = {
+      config,
+      lib,
+      pkgs,
+      ...
+    }: let
+      cfg = config.programs.fishy-zsh;
+      p = self.packages.${pkgs.stdenv.hostPlatform.system};
+    in {
+      options.programs.fishy-zsh.enable = lib.mkEnableOption "fish 4.9's interactive UX in zsh (fishy-zsh)";
+      config = lib.mkIf cfg.enable {
+        programs.zsh = {
+          enable = true;
+          package = p.fishy-zsh;
+          # .zshenv is the only file zsh reads before /etc/zshrc loads zle,
+          # which must not happen before start.zsh (see AGENTS.md, Prompt).
+          envExtra = lib.mkBefore ''
+            export FISHY_FISH=${p.fishy-fish}/bin/fish
+            source ${p.fishy}/start.zsh
+          '';
+          initContent = lib.mkOrder 2000 ''
+            source ${p.fishy}/fishy.zsh
+          '';
+        };
+      };
+    };
+
     apps = forAll (pkgs: {
       try = {
         type = "app";
@@ -82,6 +113,9 @@
         preAutoreconf = "./Util/preconfig";
         postInstall = builtins.replaceStrings ["zsh-5.9.2"] ["zsh-${zshVersion}"] old.postInstall;
       });
+
+      # The zsh side (fishy/), as the Home Manager module sources it.
+      fishy = pkgs.runCommand "fishy" {} "cp -r ${./fishy} $out";
 
       # `nix run .#try`: fishy zsh in the current terminal with your real zsh
       # config, from this checkout (edits to fishy/*.zsh apply on next launch).
